@@ -1,0 +1,32 @@
+batch_size: 1
+complex_augmentation: false
+dab: 1.0
+data_root: data
+debug: false
+do_augmentation: false
+eosin: 0.0
+gamma: 2.1
+image_extensions:
+- .npy
+- .png
+- .jpg
+- .tiff
+img_path: ../data/lafe/processed/processed_annotations/imgs
+inversion: false
+mask_extensions:
+- .npy
+- .png
+mask_path: ../data/lafe/processed/processed_annotations/masks_npy
+normalize: false
+normalize_inf: true
+num_workers: 0
+only_nuclei: false
+pin_memory: true
+random_seed: 42
+rgb_transform: false
+shuffle: false
+stain_transform: true
+target_size: null
+test_split: 0.1
+train_split: 0.8
+val_split: 0.1
