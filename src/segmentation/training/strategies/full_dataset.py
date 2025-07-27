@@ -7,6 +7,7 @@ from torch.utils.data import Dataset, Subset
 import random
 
 from .training_strategy import TrainingStrategy
+from segmentation.datasets.dataset_factory import DatasetFactory
 
 
 class FullDatasetStrategy(TrainingStrategy):
@@ -69,11 +70,9 @@ class FullDatasetStrategy(TrainingStrategy):
         train_dataset, val_dataset_for_eval = data_splits[0]
         
         # Create data loaders
-        from datasets.cellsam_datasets import get_cellsam_dataloaders
-        
-        dataloaders = get_cellsam_dataloaders(
+        dataloaders = DatasetFactory().create_dataloaders(
             {'train': train_dataset}, 
-            batch_size=config.batch_size,
+            batch_size=self.batch_size,
             shuffle=True
         )
         

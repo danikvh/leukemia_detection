@@ -49,7 +49,7 @@ class MultiStageTrainer:
         # Utilities
         self.checkpoint_manager = CheckpointManager(output_dir, fold)
         self.gpu_monitor = GPUMonitor() if stage1_config.debug else None
-        self.metrics_tracker = MetricsTracker()
+        self.metrics_tracker = MetricsTracker(self.output_dir)
         
         # Logger
         self.logger = self._setup_logger()
@@ -173,14 +173,13 @@ class MultiStageTrainer:
         """Finalize multi-stage training and prepare results."""
         # Load best Stage 2 model for final inference
         stage2_best_path = self.stage2_trainer.checkpoint_manager.get_best_model_path()
+
         if os.path.exists(stage2_best_path):
-            self.logger.info(f"Loading best Stage 2 model from {stage2_best_path}")
-            self.model.load_state_dict(
-                torch.load(stage2_best_path, map_location=self.device)
-            )
+            self.logger.info(f"Loading best Stage 1 model from {stage2_best_path}")
+            self.checkpoint_manager.load_model_state(self.model, stage2_best_path)
         else:
-            self.logger.warning("No best Stage 2 model found, using current state")
-        
+            self.logger.warning("No best Stage 1 model found, using current state")
+
         # Combine results
         combined_results = {
             'stage1': self.stage1_results,
@@ -318,3 +317,21 @@ class MultiStageTrainer:
         total_epochs = self.stage1_results['final_epoch'] + self.stage2_results['final_epoch']
         print(f"\nTOTAL TRAINING EPOCHS: {total_epochs}")
         print("=" * 80)
+
+    def finalize_with_evaluation(self, test_dataset, metrics_to_optimize=None, is_deep_model=False):
+        """Perform final evaluation after training."""
+        evaluation_config = {
+            'evaluation_methods': ['deepcell', 'coco'],
+            'iou_threshold': 0.5,
+            'save_outputs': True
+        }
+        
+        final_results = self.metrics_tracker.perform_final_evaluation(
+            model=self.model,
+            test_dataset=test_dataset,
+            metrics_to_optimize=metrics_to_optimize or ['AP50'],
+            is_deep_model=is_deep_model,
+            evaluation_config=evaluation_config
+        )
+        
+        return final_results

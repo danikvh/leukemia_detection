@@ -44,9 +44,9 @@ class BaseTrainer(ABC):
             patience=config.patience,
             min_delta=config.min_delta
         )
-        self.checkpoint_manager = CheckpointManager(output_dir, fold)
+        self.checkpoint_manager = CheckpointManager(output_dir, fold, self.device)
         self.gpu_monitor = GPUMonitor() if config.debug else None
-        self.metrics_tracker = MetricsTracker()
+        self.metrics_tracker = MetricsTracker(self.output_dir)
         
         # Logger
         self.logger = self._setup_logger()
@@ -118,13 +118,13 @@ class BaseTrainer(ABC):
         for batch_idx, batch in enumerate(train_loader):
             # Forward pass
             outputs, targets = self.forward_pass(batch)
-            
+
             # Compute loss
             loss_dict = self.compute_loss(outputs, targets)
             
             # Get total loss 
             total_loss = loss_dict['total_loss']
-            
+
             # Backward pass
             self.optimizer.zero_grad()
             total_loss.backward()
@@ -157,7 +157,7 @@ class BaseTrainer(ABC):
                 )
 
             if self.debug and self.current_epoch % self.visualization_frequency == 0:
-                self.visualize_predictions(batch, outputs, targets, self.current_epoch, batch_idx, "train")
+                self.visualize_predictions(batch[0], outputs, targets, self.current_epoch, batch_idx, "train")
         
         # Average losses
         for key in epoch_losses:
@@ -196,7 +196,7 @@ class BaseTrainer(ABC):
                 epoch_losses['total_loss'] += total_loss.item()
 
                 if self.debug and self.current_epoch % self.visualization_frequency == 0:
-                    self.visualize_predictions(batch, outputs, targets, self.current_epoch, batch_idx, "val")
+                    self.visualize_predictions(batch[0], outputs, targets, self.current_epoch, batch_idx, "val")
         
         # Average losses
         for key in epoch_losses:

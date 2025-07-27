@@ -20,7 +20,7 @@ class BaseTrainingConfig(BaseConfig):
             # Training basics
             "training_strategy": "train_val_split", # full_dataset, train_val_split, k_fold_cross_val
             "epochs": 100, 
-            "batch_size": 8,
+            "batch_size": 2,
             "learning_rate": 1e-4,
             "weight_decay": 1e-4,
 
@@ -40,7 +40,7 @@ class BaseTrainingConfig(BaseConfig):
             # Logging and output
             "output_name": "cellsam_experiment",
             "output_dir": "../output",
-            "debug": False,
+            "debug": True,
             "save_checkpoints": True,
             "save_visualizations": True,
             "save_freq": 25,

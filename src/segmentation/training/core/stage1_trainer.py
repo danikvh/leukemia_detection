@@ -94,7 +94,7 @@ class Stage1Trainer(BaseTrainer):
             param.requires_grad = True
         
         param_groups = [
-            {"params": head_params, "lr": self.stage1_config.lr}
+            {"params": head_params, "lr": self.stage1_config.learning_rate}
         ]
         
         # Add backbone parameters based on strategy
@@ -104,7 +104,7 @@ class Stage1Trainer(BaseTrainer):
             self.unfreeze_parameters(backbone)
             param_groups.append({
                 "params": backbone.parameters(),
-                "lr": self.stage1_config.backbone_lr
+                "lr": self.stage1_config.learning_rate
             })
             self.logger.info("Training CellFinder backbone")
             
@@ -118,7 +118,7 @@ class Stage1Trainer(BaseTrainer):
                 param.requires_grad = True
             param_groups.append({
                 "params": image_encoder_params,
-                "lr": self.stage1_config.backbone_lr
+                "lr": self.stage1_config.learning_rate
             })
             self.logger.info("Training image encoder backbone")
         
@@ -134,7 +134,7 @@ class Stage1Trainer(BaseTrainer):
         
         for b_idx in range(images_batch.shape[0]):
             mask = instance_masks_batch[b_idx].squeeze()
-            
+                
             # Ensure integer type
             if mask.dtype.is_floating_point:
                 mask = mask.round().int()
@@ -210,9 +210,9 @@ class Stage1Trainer(BaseTrainer):
         preprocessed_images = preprocessed_images.to(self.device)
         
         # Convert masks to targets
-        instance_masks = masks.to(self.device)
+        instance_masks = [mask.to(self.device) for mask in masks]
         targets = self.convert_to_targets(preprocessed_images, instance_masks)
-        
+
         # Create NestedTensor for DETR
         if not isinstance(preprocessed_images, NestedTensor):
             images_nt = nested_tensor_from_tensor_list(preprocessed_images)
@@ -231,12 +231,9 @@ class Stage1Trainer(BaseTrainer):
         targets: List[Dict]
     ) -> Dict[str, torch.Tensor]:
         """Compute Stage 1 losses."""
-        # Get total loss (already properly weighted by the loss object)
-        total_loss = self.criterion(outputs, targets)
-        
-        # Get individual components for logging
-        loss_components = self.criterion.get_loss_components(outputs, targets)
-        
+        # Get total loss and components
+        total_loss, loss_components = self.loss_manager.forward(outputs, targets)
+
         # Return structured dictionary
         result = {'total_loss': total_loss}
         result.update(loss_components)
@@ -258,11 +255,13 @@ class Stage1Trainer(BaseTrainer):
         
         # Get matches
         indices = self.matcher.forward(outputs, targets)
-        
-        for img_idx in range(len(images)):
-            image_tensor = images[img_idx].cpu()
+
+        for img_idx, image_tensor in enumerate(images):
+            # Make sure image_tensor is a tensor, move to cpu
+            image_tensor = image_tensor.cpu()
+
             gt_boxes = targets[img_idx]['boxes'].clone().cpu()
-            
+
             # Get matched predictions
             pred_inds, gt_inds = indices[img_idx]
             if len(pred_inds) > 0:
@@ -283,9 +282,18 @@ class Stage1Trainer(BaseTrainer):
         save_path: str
     ) -> None:
         """Save bounding box visualization."""
+        # Handle batch dimension
+        if len(image_tensor.shape) == 4:  # e.g., [1, 3, H, W]
+            if image_tensor.shape[0] == 1:
+                image_tensor = image_tensor[0]  # remove batch dimension
+            else:
+                raise ValueError(f"Expected single image in batch but got {image_tensor.shape[0]} images")
+
         # Convert to numpy
         if image_tensor.ndim == 3:
             image_np = image_tensor.permute(1, 2, 0).numpy()
+        else:
+            raise ValueError(f"Unexpected image_tensor shape: {image_tensor.shape}")
         
         fig, ax = plt.subplots(1, figsize=(10, 10))
         ax.imshow(image_np.astype("uint8"))
@@ -364,9 +372,7 @@ class Stage1Trainer(BaseTrainer):
         best_model_path = self.checkpoint_manager.get_best_model_path()
         if os.path.exists(best_model_path):
             self.logger.info(f"Loading best Stage 1 model from {best_model_path}")
-            self.model.load_state_dict(
-                torch.load(best_model_path, map_location=self.device)
-            )
+            self.checkpoint_manager.load_model_state(self.model, best_model_path)
         else:
             self.logger.warning("No best Stage 1 model found, using current state")
         

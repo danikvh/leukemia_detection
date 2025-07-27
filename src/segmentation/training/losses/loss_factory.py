@@ -62,13 +62,7 @@ class LossFactory:
     @classmethod
     def create_stage2_loss(cls, config) -> BaseLoss:
         """Create Stage 2 (segmentation) loss."""
-        return CombinedSegmentationLoss(
-            focal_weight=config.focal_loss_weight,
-            dice_weight=config.dice_loss_weight,
-            boundary_weight=config.boundary_loss_weight,
-            focal_alpha=config.focal_alpha,
-            focal_gamma=config.focal_gamma
-        )
+        return CombinedSegmentationLoss(config)
     
     @classmethod
     def create_combined_loss(cls, losses_config: Dict[str, Dict[str, Any]]) -> WeightedCombinedLoss:

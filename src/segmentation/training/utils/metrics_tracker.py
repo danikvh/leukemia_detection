@@ -1,19 +1,25 @@
-"""Training metrics tracking utilities."""
+"""Enhanced training metrics tracking utilities with final model evaluation."""
 
 import json
 import numpy as np
-from typing import Dict, List, Optional, Any, Union
+import torch
+from typing import Dict, List, Optional, Any, Union, Tuple
 from collections import defaultdict, deque
 from pathlib import Path
 import logging
+import os
+
+# Import existing components
+from segmentation.inference.inference_engine import InferenceEngine, InferenceConfig
+from segmentation.inference.threshold_optimizer import ThresholdOptimizer, ThresholdSearchConfig
 
 
 class MetricsTracker:
-    """Track training metrics over time."""
+    """Metrics tracker with final model evaluation capabilities."""
     
     def __init__(self, save_dir: Optional[str] = None, window_size: int = 10):
         """
-        Initialize metrics tracker.
+        Initialize enhanced metrics tracker.
         
         Args:
             save_dir: Directory to save metrics.
@@ -22,101 +28,391 @@ class MetricsTracker:
         self.save_dir = Path(save_dir) if save_dir else None
         self.window_size = window_size
         
-        # Store all metrics
-        self.metrics = defaultdict(list)
+        # Store metrics by phase (train/val)
+        self.history = {
+            'train': defaultdict(list),
+            'val': defaultdict(list)
+        }
         
         # Store recent values for moving averages
-        self.recent_values = defaultdict(lambda: deque(maxlen=window_size))
+        self.recent_values = {
+            'train': defaultdict(lambda: deque(maxlen=window_size)),
+            'val': defaultdict(lambda: deque(maxlen=window_size))
+        }
         
-        # Store best values
-        self.best_values = {}
-        self.best_epochs = {}
+        # Store best values (assuming lower is better for losses)
+        self.best_values = {
+            'train': {},
+            'val': {}
+        }
+        self.best_epochs = {
+            'train': {},
+            'val': {}
+        }
         
-        # Current epoch
-        self.current_epoch = 0
+        # Final evaluation results
+        self.final_evaluation_results = {}
+        self.optimal_thresholds = {}
         
         self.logger = logging.getLogger(__name__)
         
         if self.save_dir:
             self.save_dir.mkdir(parents=True, exist_ok=True)
     
-    def update(self, metrics_dict: Dict[str, float], epoch: Optional[int] = None) -> None:
+    def log_epoch_metrics(self, phase: str, epoch: int, metrics_dict: Dict[str, Union[float, torch.Tensor]]) -> None:
         """
-        Update metrics with new values.
+        Log metrics for an epoch.
         
         Args:
-            metrics_dict: Dictionary of metric names to values.
+            phase: Training phase ('train' or 'val').
             epoch: Current epoch number.
+            metrics_dict: Dictionary of metric names to values.
         """
-        if epoch is not None:
-            self.current_epoch = epoch
-            
+        if phase not in self.history:
+            self.history[phase] = defaultdict(list)
+            self.recent_values[phase] = defaultdict(lambda: deque(maxlen=self.window_size))
+            self.best_values[phase] = {}
+            self.best_epochs[phase] = {}
+        
         for name, value in metrics_dict.items():
             # Convert tensor to float if needed
             if hasattr(value, 'item'):
                 value = value.item()
+            elif isinstance(value, torch.Tensor):
+                value = float(value.detach().cpu().numpy())
             
             # Store the value
-            self.metrics[name].append(value)
-            self.recent_values[name].append(value)
+            self.history[phase][name].append(value)
+            self.recent_values[phase][name].append(value)
             
             # Update best values (assuming lower is better for losses)
-            if name not in self.best_values:
-                self.best_values[name] = value
-                self.best_epochs[name] = self.current_epoch
-            elif value < self.best_values[name]:
-                self.best_values[name] = value
-                self.best_epochs[name] = self.current_epoch
+            if name not in self.best_values[phase]:
+                self.best_values[phase][name] = value
+                self.best_epochs[phase][name] = epoch
+            elif value < self.best_values[phase][name]:
+                self.best_values[phase][name] = value
+                self.best_epochs[phase][name] = epoch
     
-    def get_latest(self, metric_name: str) -> Optional[float]:
-        """Get the latest value of a metric."""
-        if metric_name in self.metrics and self.metrics[metric_name]:
-            return self.metrics[metric_name][-1]
-        return None
-    
-    def get_moving_average(self, metric_name: str) -> Optional[float]:
-        """Get the moving average of a metric."""
-        if metric_name in self.recent_values and self.recent_values[metric_name]:
-            return np.mean(list(self.recent_values[metric_name]))
-        return None
-    
-    def get_best(self, metric_name: str) -> Optional[tuple]:
+    def perform_final_evaluation(
+        self,
+        model: torch.nn.Module,
+        test_dataset,
+        metrics_to_optimize: List[str] = None,
+        is_deep_model: bool = False,
+        evaluation_config: Optional[Dict] = None
+    ) -> Dict[str, Any]:
         """
-        Get the best value and epoch for a metric.
+        Perform final model evaluation with optimal threshold finding.
         
+        Args:
+            model: Trained model to evaluate
+            test_dataset: Test dataset for evaluation
+            metrics_to_optimize: List of metrics to find optimal thresholds for
+            is_deep_model: Whether the model was trained for many epochs
+            evaluation_config: Additional configuration parameters
+            
         Returns:
-            Tuple of (best_value, best_epoch) or None.
+            Dictionary containing all evaluation results
         """
-        if metric_name in self.best_values:
-            return self.best_values[metric_name], self.best_epochs[metric_name]
-        return None
-    
-    def get_all_metrics(self, metric_name: str) -> List[float]:
-        """Get all recorded values for a metric."""
-        return self.metrics.get(metric_name, [])
-    
-    def get_summary(self) -> Dict[str, Dict[str, Any]]:
-        """
-        Get a summary of all metrics.
+        if metrics_to_optimize is None:
+            metrics_to_optimize = ['AP50']
         
-        Returns:
-            Dictionary with summary statistics for each metric.
-        """
+        if evaluation_config is None:
+            evaluation_config = {}
+        
+        self.logger.info("=" * 60)
+        self.logger.info("STARTING FINAL MODEL EVALUATION")
+        self.logger.info("=" * 60)
+        self.logger.info(f"Optimizing thresholds for: {metrics_to_optimize}")
+        
+        # Create evaluation directory
+        eval_dir = self.save_dir / "final_evaluation" if self.save_dir else Path("./final_evaluation")
+        eval_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Step 1: Find optimal thresholds
+        optimal_thresholds = self._find_optimal_thresholds(
+            model, test_dataset, metrics_to_optimize, is_deep_model, evaluation_config
+        )
+        
+        # Step 2: Evaluate with optimal thresholds
+        evaluation_results = self._evaluate_with_optimal_thresholds(
+            model, test_dataset, optimal_thresholds, evaluation_config
+        )
+        
+        # Step 3: Combine and store results
+        final_results = {
+            'optimal_thresholds': optimal_thresholds,
+            'evaluation_results': evaluation_results,
+            'training_summary': self.get_training_summary(),
+            'best_training_metrics': self._get_best_training_metrics()
+        }
+        
+        # Store results
+        self.final_evaluation_results = final_results
+        self.optimal_thresholds = optimal_thresholds
+        
+        # Save results
+        self._save_final_evaluation_results(final_results, eval_dir)
+        
+        # Print summary
+        self._print_final_evaluation_summary(final_results)
+        
+        self.logger.info("Final model evaluation completed successfully")
+        
+        return final_results
+    
+    def _find_optimal_thresholds(
+        self,
+        model: torch.nn.Module,
+        dataset,
+        metrics_to_optimize: List[str],
+        is_deep_model: bool,
+        evaluation_config: Dict
+    ) -> Dict[str, Dict]:
+        """Find optimal thresholds for specified metrics."""
+        self.logger.info("🔍 Finding optimal thresholds...")
+        
+        # Create base inference config
+        base_config = InferenceConfig(
+            save_outputs=False,  # keep explicit control
+            evaluation_methods=evaluation_config.get('evaluation_methods', ['deepcell', 'coco']),
+            **{k: v for k, v in evaluation_config.items() 
+            if k not in ['evaluation_methods', 'save_outputs']}
+        )
+        
+        # Create threshold search config
+        search_config = ThresholdSearchConfig()
+        
+        # Initialize threshold optimizer
+        optimizer = ThresholdOptimizer(model, base_config, search_config)
+        
+        # Run optimization
+        threshold_results = optimizer.optimize(
+            dataset=dataset,
+            metrics=metrics_to_optimize,
+            is_deep_model=is_deep_model
+        )
+        
+        # Extract optimal thresholds
+        optimal_thresholds = {}
+        for metric, result_data in threshold_results.items():
+            best_result = result_data['best_result']
+            optimal_thresholds[metric] = {
+                'threshold': best_result.threshold,
+                'score': best_result.score,
+                'search_history': len(result_data['search_history'])
+            }
+            
+            self.logger.info(
+                f"✅ {metric.upper()}: optimal threshold = {best_result.threshold:.6f}, "
+                f"score = {best_result.score:.6f}"
+            )
+        
+        return optimal_thresholds
+    
+    def _evaluate_with_optimal_thresholds(
+        self,
+        model: torch.nn.Module,
+        dataset,
+        optimal_thresholds: Dict[str, Dict],
+        evaluation_config: Dict
+    ) -> Dict[str, Dict]:
+        """Evaluate model with each optimal threshold."""
+        self.logger.info("📊 Evaluating with optimal thresholds...")
+        
+        evaluation_results = {}
+        
+        for metric, threshold_info in optimal_thresholds.items():
+            threshold = threshold_info['threshold']
+            
+            self.logger.info(f"Evaluating with {metric} optimal threshold: {threshold:.6f}")
+            
+            # Create inference config with optimal threshold
+            config = InferenceConfig(
+                bbox_threshold=threshold,
+                save_outputs=True,
+                evaluation_methods=evaluation_config.get('evaluation_methods', ['deepcell', 'coco']),
+                **{k: v for k, v in evaluation_config.items() if k not in ['evaluation_methods', 'save_outputs']}
+            )
+            
+            # Create inference engine
+            inference_engine = InferenceEngine(model, config)
+            
+            # Run evaluation
+            results = inference_engine.process_dataset(
+                dataset,
+                output_path=str(self.save_dir / "final_evaluation" / f"{metric}_threshold_results"),
+                test_mode=False,
+                visualize=False
+            )
+            
+            # Store results
+            evaluation_results[metric] = {
+                'threshold_used': threshold,
+                'metrics': results,
+                'summary': self._extract_key_metrics(results)
+            }
+        
+        return evaluation_results
+    
+    def _extract_key_metrics(self, results: Dict) -> Dict[str, float]:
+        """Extract key metrics from evaluation results."""
+        batch_metrics = results.get('batch_metrics', {})
+        
+        key_metrics = {}
+        
+        # Standard metrics
+        for metric in ['precision', 'recall', 'f1', 'dice', 'jaccard', 'AP', 'AP50', 'AP75']:
+            if metric in batch_metrics:
+                key_metrics[metric] = batch_metrics[metric]
+        
+        return key_metrics
+    
+    def _get_best_training_metrics(self) -> Dict[str, Dict]:
+        """Get best metrics achieved during training."""
+        best_metrics = {}
+        
+        for phase in ['train', 'val']:
+            if phase in self.best_values:
+                best_metrics[phase] = {}
+                for metric, value in self.best_values[phase].items():
+                    epoch = self.best_epochs[phase].get(metric, 0)
+                    best_metrics[phase][metric] = {
+                        'value': value,
+                        'epoch': epoch
+                    }
+        
+        return best_metrics
+    
+    def get_training_summary(self) -> Dict[str, Any]:
+        """Get comprehensive training summary."""
         summary = {}
         
-        for name, values in self.metrics.items():
-            if values:
-                summary[name] = {
-                    'latest': values[-1],
-                    'best': self.best_values.get(name),
-                    'best_epoch': self.best_epochs.get(name),
-                    'mean': np.mean(values),
-                    'std': np.std(values),
-                    'moving_avg': self.get_moving_average(name),
-                    'count': len(values)
-                }
+        for phase in ['train', 'val']:
+            if phase in self.history:
+                phase_summary = {}
+                for metric, values in self.history[phase].items():
+                    if values:
+                        phase_summary[metric] = {
+                            'final_value': values[-1] if values else None,
+                            'best_value': self.best_values[phase].get(metric),
+                            'best_epoch': self.best_epochs[phase].get(metric),
+                            'total_epochs': len(values),
+                            'mean': np.mean(values),
+                            'std': np.std(values)
+                        }
+                summary[phase] = phase_summary
         
         return summary
+    
+    def _save_final_evaluation_results(self, results: Dict, eval_dir: Path) -> None:
+        """Save final evaluation results to files."""
+        # Save complete results
+        complete_path = eval_dir / "complete_evaluation_results.json"
+        with open(complete_path, 'w') as f:
+            json.dump(results, f, indent=2, default=self._json_serializer)
+        
+        # Save optimal thresholds summary
+        thresholds_path = eval_dir / "optimal_thresholds.json"
+        with open(thresholds_path, 'w') as f:
+            json.dump(results['optimal_thresholds'], f, indent=2, default=self._json_serializer)
+        
+        # Save performance summary
+        performance_summary = {}
+        for metric, eval_result in results['evaluation_results'].items():
+            performance_summary[metric] = {
+                'threshold': eval_result['threshold_used'],
+                'key_metrics': eval_result['summary']
+            }
+        
+        performance_path = eval_dir / "performance_summary.json"
+        with open(performance_path, 'w') as f:
+            json.dump(performance_summary, f, indent=2, default=self._json_serializer)
+        
+        self.logger.info(f"Final evaluation results saved to {eval_dir}")
+    
+    def _print_final_evaluation_summary(self, results: Dict) -> None:
+        """Print formatted final evaluation summary."""
+        print("\n" + "=" * 80)
+        print("FINAL MODEL EVALUATION SUMMARY")
+        print("=" * 80)
+        
+        # Print optimal thresholds
+        print("\n📍 OPTIMAL THRESHOLDS:")
+        print("-" * 40)
+        for metric, threshold_info in results['optimal_thresholds'].items():
+            print(f"  {metric.upper():8s}: {threshold_info['threshold']:.6f} "
+                  f"(score: {threshold_info['score']:.6f})")
+        
+        # Print evaluation results
+        print("\n📊 EVALUATION RESULTS:")
+        print("-" * 40)
+        for metric, eval_result in results['evaluation_results'].items():
+            print(f"\n  {metric.upper()} Threshold ({eval_result['threshold_used']:.6f}):")
+            summary = eval_result['summary']
+            for key, value in summary.items():
+                print(f"    {key:12s}: {value:.6f}")
+        
+        # Print best training metrics
+        print("\n🏆 BEST TRAINING METRICS:")
+        print("-" * 40)
+        best_metrics = results['best_training_metrics']
+        for phase, metrics in best_metrics.items():
+            if metrics:  # Only print if there are metrics
+                print(f"\n  {phase.upper()}:")
+                for metric, info in metrics.items():
+                    print(f"    {metric:15s}: {info['value']:.6f} (epoch {info['epoch']})")
+        
+        print("\n" + "=" * 80)
+    
+    def get_final_evaluation_results(self) -> Dict[str, Any]:
+        """Get final evaluation results."""
+        return self.final_evaluation_results
+    
+    def get_optimal_thresholds(self) -> Dict[str, Dict]:
+        """Get optimal thresholds."""
+        return self.optimal_thresholds
+    
+    def get_best_threshold_for_metric(self, metric: str) -> Optional[float]:
+        """Get the best threshold for a specific metric."""
+        if metric in self.optimal_thresholds:
+            return self.optimal_thresholds[metric]['threshold']
+        return None
+    
+    def _json_serializer(self, obj):
+        """Custom JSON serializer for numpy types."""
+        if isinstance(obj, (np.integer, np.floating)):
+            return obj.item()
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        elif isinstance(obj, torch.Tensor):
+            return obj.detach().cpu().numpy().tolist()
+        return str(obj)
+    
+    # Keep all existing methods from the original MetricsTracker
+    def get_latest(self, metric_name: str, phase: str = 'train') -> Optional[float]:
+        """Get the latest value of a metric."""
+        if phase in self.history and metric_name in self.history[phase] and self.history[phase][metric_name]:
+            return self.history[phase][metric_name][-1]
+        return None
+    
+    def get_moving_average(self, metric_name: str, phase: str = 'train') -> Optional[float]:
+        """Get the moving average of a metric."""
+        if phase in self.recent_values and metric_name in self.recent_values[phase] and self.recent_values[phase][metric_name]:
+            return np.mean(list(self.recent_values[phase][metric_name]))
+        return None
+    
+    def get_best(self, metric_name: str, phase: str = 'train') -> Optional[tuple]:
+        """Get the best value and epoch for a metric."""
+        if phase in self.best_values and metric_name in self.best_values[phase]:
+            return self.best_values[phase][metric_name], self.best_epochs[phase][metric_name]
+        return None
+    
+    def get_history(self, phase: str) -> Optional[Dict[str, List[float]]]:
+        """Get history of all metrics for a phase."""
+        if phase in self.history:
+            return dict(self.history[phase])
+        return None
     
     def save_metrics(self, filename: str = "metrics.json") -> None:
         """Save all metrics to a JSON file."""
@@ -126,353 +422,153 @@ class MetricsTracker:
             
         # Convert defaultdict to regular dict for JSON serialization
         metrics_dict = {
-            'metrics': dict(self.metrics),
+            'history': {phase: dict(metrics) for phase, metrics in self.history.items()},
             'best_values': self.best_values,
             'best_epochs': self.best_epochs,
-            'summary': self.get_summary()
+            'summary': self.get_summary(),
+            'final_evaluation': self.final_evaluation_results,
+            'optimal_thresholds': self.optimal_thresholds
         }
         
         save_path = self.save_dir / filename
         with open(save_path, 'w') as f:
-            json.dump(metrics_dict, f, indent=2)
+            json.dump(metrics_dict, f, indent=2, default=self._json_serializer)
         
         self.logger.info(f"Metrics saved to {save_path}")
     
-    def load_metrics(self, filepath: str) -> None:
-        """Load metrics from a JSON file."""
-        with open(filepath, 'r') as f:
-            data = json.load(f)
+    def get_summary(self, phase: Optional[str] = None) -> Dict[str, Dict[str, Any]]:
+        """Get a summary of all metrics."""
+        summary = {}
         
-        # Restore metrics
-        self.metrics = defaultdict(list, data.get('metrics', {}))
-        self.best_values = data.get('best_values', {})
-        self.best_epochs = data.get('best_epochs', {})
+        phases_to_process = [phase] if phase else list(self.history.keys())
         
-        # Restore recent values (only keep last window_size values)
-        for name, values in self.metrics.items():
-            self.recent_values[name] = deque(values[-self.window_size:], 
-                                           maxlen=self.window_size)
-        
-        self.logger.info(f"Metrics loaded from {filepath}")
-    
-    def reset(self) -> None:
-        """Reset all metrics."""
-        self.metrics.clear()
-        self.recent_values.clear()
-        self.best_values.clear()
-        self.best_epochs.clear()
-        self.current_epoch = 0
-    
-    def has_improved(self, metric_name: str, patience: int = 1) -> bool:
-        """
-        Check if a metric has improved in the last N epochs.
-        
-        Args:
-            metric_name: Name of the metric to check.
-            patience: Number of epochs to look back.
+        for p in phases_to_process:
+            if p not in self.history:
+                continue
+                
+            phase_summary = {}
+            for name, values in self.history[p].items():
+                if values:
+                    phase_summary[name] = {
+                        'latest': values[-1],
+                        'best': self.best_values[p].get(name),
+                        'best_epoch': self.best_epochs[p].get(name),
+                        'mean': np.mean(values),
+                        'std': np.std(values),
+                        'moving_avg': self.get_moving_average(name, p),
+                        'count': len(values)
+                    }
             
-        Returns:
-            True if the metric improved in the last `patience` epochs.
-        """
-        if metric_name not in self.best_epochs:
-            return False
-            
-        best_epoch = self.best_epochs[metric_name]
-        return self.current_epoch - best_epoch <= patience
+            if phase:
+                return phase_summary
+            else:
+                summary[p] = phase_summary
+        
+        return summary
 
 
 class MultiStageMetricsTracker:
-    """Track metrics for multi-stage training."""
+    """Enhanced multi-stage metrics tracker with final evaluation."""
     
     def __init__(self, save_dir: Optional[str] = None, stages: List[str] = None):
-        """
-        Initialize multi-stage metrics tracker.
-        
-        Args:
-            save_dir: Directory to save metrics.
-            stages: List of stage names (e.g., ['stage1', 'stage2']).
-        """
+        """Initialize enhanced multi-stage metrics tracker."""
         self.save_dir = Path(save_dir) if save_dir else None
         self.stages = stages or ['stage1', 'stage2']
         
-        # Create tracker for each stage
+        # Create enhanced tracker for each stage
         self.stage_trackers = {}
         for stage in self.stages:
             stage_dir = self.save_dir / stage if self.save_dir else None
             self.stage_trackers[stage] = MetricsTracker(stage_dir)
         
-        # Global tracker for overall metrics
+        # Global enhanced tracker
         self.global_tracker = MetricsTracker(self.save_dir)
     
-    def update_stage(self, stage: str, metrics_dict: Dict[str, float], 
-                    epoch: Optional[int] = None) -> None:
-        """Update metrics for a specific stage."""
-        if stage in self.stage_trackers:
-            self.stage_trackers[stage].update(metrics_dict, epoch)
-    
-    def update_global(self, metrics_dict: Dict[str, float], 
-                     epoch: Optional[int] = None) -> None:
-        """Update global metrics."""
-        self.global_tracker.update(metrics_dict, epoch)
-    
-    def get_stage_tracker(self, stage: str) -> Optional[MetricsTracker]:
-        """Get tracker for a specific stage."""
-        return self.stage_trackers.get(stage)
+    def perform_final_evaluation(
+        self,
+        model: torch.nn.Module,
+        test_dataset,
+        metrics_to_optimize: List[str] = None,
+        is_deep_model: bool = False,
+        evaluation_config: Optional[Dict] = None
+    ) -> Dict[str, Any]:
+        """Perform final evaluation using the global tracker."""
+        return self.global_tracker.perform_final_evaluation(
+            model, test_dataset, metrics_to_optimize, is_deep_model, evaluation_config
+        )
     
     def get_global_tracker(self) -> MetricsTracker:
-        """Get global tracker."""
+        """Get the enhanced global tracker."""
         return self.global_tracker
     
-    def save_all_metrics(self) -> None:
-        """Save metrics for all stages."""
-        # Save stage-specific metrics
-        for stage, tracker in self.stage_trackers.items():
-            tracker.save_metrics(f"{stage}_metrics.json")
-        
-        # Save global metrics
-        self.global_tracker.save_metrics("global_metrics.json")
+    def log_stage_metrics(self, stage: str, phase: str, epoch: int, 
+                         metrics_dict: Dict[str, Union[float, torch.Tensor]]) -> None:
+        """Log metrics for a specific stage."""
+        if stage in self.stage_trackers:
+            self.stage_trackers[stage].log_epoch_metrics(phase, epoch, metrics_dict)
     
-    def get_combined_summary(self) -> Dict[str, Dict]:
-        """Get combined summary of all stages."""
-        summary = {}
-        
-        for stage, tracker in self.stage_trackers.items():
-            summary[stage] = tracker.get_summary()
-        
-        summary['global'] = self.global_tracker.get_summary()
-        return summary
+    def log_global_metrics(self, phase: str, epoch: int, 
+                          metrics_dict: Dict[str, Union[float, torch.Tensor]]) -> None:
+        """Log global metrics."""
+        self.global_tracker.log_epoch_metrics(phase, epoch, metrics_dict)
 
 
-class FoldMetricsAggregator:
-    """Aggregate metrics across multiple folds for k-fold cross-validation."""
-    
-    def __init__(self, save_dir: Optional[str] = None):
-        """
-        Initialize fold metrics aggregator.
-        
-        Args:
-            save_dir: Directory to save aggregated metrics.
-        """
-        self.save_dir = Path(save_dir) if save_dir else None
-        self.fold_results = []
-        self.logger = logging.getLogger(__name__)
-        
-        if self.save_dir:
-            self.save_dir.mkdir(parents=True, exist_ok=True)
-    
-    def add_fold_results(self, fold_idx: int, results: Dict) -> None:
-        """
-        Add results from a single fold.
-        
-        Args:
-            fold_idx: Fold index.
-            results: Dictionary containing fold results.
-        """
-        fold_data = {
-            'fold': fold_idx,
-            'results': results
-        }
-        self.fold_results.append(fold_data)
-    
-    def aggregate_metrics(self) -> Dict[str, Dict]:
-        """
-        Aggregate metrics across all folds.
-        
-        Returns:
-            Dictionary containing aggregated statistics.
-        """
-        if not self.fold_results:
-            return {}
-        
-        # Extract metric keys from first fold
-        first_fold = self.fold_results[0]['results']
-        
-        # Handle nested structure (e.g., best_f1, best_dice, best_ap50)
-        aggregated = {}
-        
-        for result_type in first_fold.keys():
-            if isinstance(first_fold[result_type], dict):
-                aggregated[result_type] = {}
-                
-                for metric_name in first_fold[result_type].keys():
-                    # Collect values across folds
-                    values = []
-                    for fold_data in self.fold_results:
-                        fold_result = fold_data['results'][result_type][metric_name]
-                        if isinstance(fold_result, list):
-                            values.append(fold_result)
-                        else:
-                            values.append([fold_result])
-                    
-                    # Convert to numpy array for easier computation
-                    values_array = np.array(values)
-                    
-                    # Compute statistics
-                    aggregated[result_type][metric_name] = {
-                        'mean': np.mean(values_array, axis=0).tolist(),
-                        'std': np.std(values_array, axis=0).tolist(),
-                        'min': np.min(values_array, axis=0).tolist(),
-                        'max': np.max(values_array, axis=0).tolist(),
-                        'median': np.median(values_array, axis=0).tolist(),
-                        'values_per_fold': [v.tolist() if isinstance(v, np.ndarray) 
-                                          else v for v in values]
-                    }
-        
-        return aggregated
-    
-    def print_summary(self) -> None:
-        """Print summary of aggregated metrics."""
-        aggregated = self.aggregate_metrics()
-        
-        print("=" * 60)
-        print("K-FOLD CROSS-VALIDATION SUMMARY")
-        print("=" * 60)
-        
-        for result_type, metrics in aggregated.items():
-            print(f"\n{result_type.upper()}:")
-            print("-" * 40)
-            
-            for metric_name, stats in metrics.items():
-                if isinstance(stats['mean'], list):
-                    mean_val = np.mean(stats['mean'])
-                    std_val = np.mean(stats['std'])
-                else:
-                    mean_val = stats['mean']
-                    std_val = stats['std']
-                
-                print(f"  {metric_name:15s}: {mean_val:.4f} ± {std_val:.4f}")
-    
-    def save_aggregated_results(self, filename: str = "aggregated_results.json") -> None:
-        """Save aggregated results to file."""
-        if not self.save_dir:
-            self.logger.warning("No save directory specified")
-            return
-        
-        aggregated = self.aggregate_metrics()
-        
-        # Add metadata
-        results_with_metadata = {
-            'num_folds': len(self.fold_results),
-            'fold_indices': [fold['fold'] for fold in self.fold_results],
-            'aggregated_metrics': aggregated,
-            'individual_fold_results': self.fold_results
-        }
-        
-        save_path = self.save_dir / filename
-        with open(save_path, 'w') as f:
-            json.dump(results_with_metadata, f, indent=2)
-        
-        self.logger.info(f"Aggregated results saved to {save_path}")
-
-
-class LossComponentTracker:
-    """Track individual loss components during training."""
-    
-    def __init__(self):
-        """Initialize loss component tracker."""
-        self.components = defaultdict(list)
-        self.weights = {}
-    
-    def update_components(self, loss_dict: Dict[str, Union[float, torch.Tensor]], 
-                         weights: Optional[Dict[str, float]] = None) -> None:
-        """
-        Update loss components.
-        
-        Args:
-            loss_dict: Dictionary of loss component names to values.
-            weights: Optional dictionary of loss weights.
-        """
-        for name, value in loss_dict.items():
-            if hasattr(value, 'item'):
-                value = value.item()
-            self.components[name].append(value)
-        
-        if weights:
-            self.weights.update(weights)
-    
-    def get_weighted_total(self) -> Optional[float]:
-        """Calculate weighted total loss from latest components."""
-        if not self.components:
-            return None
-        
-        total = 0.0
-        for name, values in self.components.items():
-            if values:  # Check if list is not empty
-                latest_value = values[-1]
-                weight = self.weights.get(name, 1.0)
-                total += latest_value * weight
-        
-        return total
-    
-    def get_component_history(self, component: str) -> List[float]:
-        """Get history of a specific component."""
-        return self.components.get(component, [])
-    
-    def get_all_components(self) -> Dict[str, List[float]]:
-        """Get all component histories."""
-        return dict(self.components)
-
-
-# Utility functions for metrics aggregation
-def aggregate_metrics_across_folds(results_per_fold: List[Dict]) -> Dict:
+# Utility function to integrate with existing training pipeline
+def create_metrics_tracker(save_dir: str, multi_stage: bool = True) -> Union[MetricsTracker, MultiStageMetricsTracker]:
     """
-    Aggregate metrics across folds.
+    Factory function to create appropriate metrics tracker.
     
     Args:
-        results_per_fold: List of result dictionaries from each fold.
+        save_dir: Directory to save metrics
+        multi_stage: Whether to create multi-stage tracker
         
     Returns:
-        Dictionary with aggregated statistics.
+        Enhanced metrics tracker instance
     """
-    aggregator = FoldMetricsAggregator()
-    
-    for i, results in enumerate(results_per_fold):
-        aggregator.add_fold_results(i, results)
-    
-    return aggregator.aggregate_metrics()
+    if multi_stage:
+        return MultiStageMetricsTracker(save_dir)
+    else:
+        return MetricsTracker(save_dir)
 
 
-def save_metrics_summary(metrics_dict: Dict, save_path: str) -> None:
-    """
-    Save metrics summary to JSON file.
+# Integration helper for existing training scripts
+class TrainingIntegrationHelper:
+    """Helper class to integrate metrics tracking with existing training pipeline."""
     
-    Args:
-        metrics_dict: Dictionary containing metrics.
-        save_path: Path to save the summary.
-    """
-    Path(save_path).parent.mkdir(parents=True, exist_ok=True)
-    
-    with open(save_path, 'w') as f:
-        json.dump(metrics_dict, f, indent=2)
-
-
-def print_metrics_summary(metrics_dict: Dict, title: str = "Metrics Summary") -> None:
-    """
-    Print formatted metrics summary.
-    
-    Args:
-        metrics_dict: Dictionary containing metrics.
-        title: Title for the summary.
-    """
-    print("=" * len(title))
-    print(title)
-    print("=" * len(title))
-    
-    for category, metrics in metrics_dict.items():
-        print(f"\n{category.upper()}:")
-        print("-" * 30)
+    @staticmethod
+    def finalize_training_with_evaluation(
+        trainer,  # MultiStageTrainer or similar
+        test_dataset,
+        metrics_to_optimize: List[str] = None,
+        is_deep_model: bool = False,
+        evaluation_config: Optional[Dict] = None
+    ) -> Dict[str, Any]:
+        """
+        Finalize training with comprehensive evaluation.
         
-        if isinstance(metrics, dict):
-            for metric, value in metrics.items():
-                if isinstance(value, dict) and 'mean' in value:
-                    if isinstance(value['mean'], list):
-                        mean_val = np.mean(value['mean'])
-                        std_val = np.mean(value.get('std', [0]))
-                    else:
-                        mean_val = value['mean']
-                        std_val = value.get('std', 0)
-                    print(f"  {metric:15s}: {mean_val:.4f} ± {std_val:.4f}")
-                else:
-                    print(f"  {metric:15s}: {value}")
+        Args:
+            trainer: Trained model instance
+            test_dataset: Test dataset for evaluation
+            metrics_to_optimize: Metrics to optimize thresholds for
+            is_deep_model: Whether model was trained extensively
+            evaluation_config: Additional evaluation configuration
+            
+        Returns:
+            Complete training and evaluation results
+        """
+        # Get the model from trainer
+        model = trainer.model if hasattr(trainer, 'model') else trainer
+        
+        # Create enhanced metrics tracker if trainer doesn't have one
+        if hasattr(trainer, 'metrics_tracker') and isinstance(trainer.metrics_tracker, (MetricsTracker, MultiStageMetricsTracker)):
+            metrics_tracker = trainer.metrics_tracker
         else:
-            print(f"  Value: {metrics}")
+            output_dir = getattr(trainer, 'output_dir', './results')
+            metrics_tracker = create_metrics_tracker(output_dir, multi_stage=True)
+        
+        # Perform final evaluation
+        final_results = metrics_tracker.perform_final_evaluation(
+            model, test_dataset, metrics_to_optimize, is_deep_model, evaluation_config
+        )
+        
+        return final_results

@@ -6,16 +6,24 @@ import torch
 from torch.utils.data import Dataset, Subset
 import random
 
-from .training_strategy import TrainingStrategy, DataSplitMixin
+from segmentation.training.strategies.training_strategy import TrainingStrategy, DataSplitMixin
+from segmentation.datasets.dataset_factory import DatasetFactory
 
 
 class TrainValSplitStrategy(TrainingStrategy, DataSplitMixin):
     """Training strategy with a single train/validation split."""
     
-    def __init__(self, val_ratio: float = 0.3, random_seed: int = 23):
+    def __init__(
+            self, 
+            val_ratio: float = 0.3, 
+            random_seed: int = 23,
+            batch_size: int = 2,
+            output_name: str = "results/train_val"):
         super().__init__(name="train_val_split")
         self.val_ratio = val_ratio
         self.random_seed = random_seed
+        self.batch_size = batch_size
+        self.output_name = output_name
     
     def prepare_data_splits(self, 
                           train_dataset: Dataset, 
@@ -55,7 +63,6 @@ class TrainValSplitStrategy(TrainingStrategy, DataSplitMixin):
     def execute_training(self, 
                         trainer,
                         data_splits: List[Tuple[Dataset, Dataset]],
-                        config,
                         **kwargs) -> List[Dict[str, Any]]:
         """
         Execute train/val split training.
@@ -80,12 +87,10 @@ class TrainValSplitStrategy(TrainingStrategy, DataSplitMixin):
         
         train_subset, val_subset = data_splits[0]
         
-        # Create data loaders
-        from datasets.cellsam_datasets import get_cellsam_dataloaders
-        
-        dataloaders = get_cellsam_dataloaders(
+        # Create data loaders     
+        dataloaders = DatasetFactory().create_dataloaders(
             {'train': train_subset, 'val': val_subset}, 
-            batch_size=config.batch_size,
+            batch_size=self.batch_size,
             shuffle=True
         )
         
@@ -99,9 +104,7 @@ class TrainValSplitStrategy(TrainingStrategy, DataSplitMixin):
         result = trainer.train(
             train_loader=train_loader,
             val_loader=val_loader,
-            val_dataset=val_subset,
-            fold_idx=0,
-            config=config
+            #val_dataset=val_subset
         )
         
         self.results = [result]
@@ -109,7 +112,7 @@ class TrainValSplitStrategy(TrainingStrategy, DataSplitMixin):
         # Save results
         import os
         import json
-        output_dir = f"../output/{config.output_name}/results"
+        output_dir = self.output_name
         os.makedirs(output_dir, exist_ok=True)
         
         with open(f"{output_dir}/train_val_results.json", "w") as f:

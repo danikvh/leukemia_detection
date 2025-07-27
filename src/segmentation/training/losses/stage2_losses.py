@@ -14,7 +14,7 @@ class DiceLoss(BaseLoss):
         super().__init__(weight=weight, name="dice")
         self.smooth = smooth
     
-    def forward(self, predictions, targets, num_boxes=None, **kwargs):
+    def forward(self, predictions, targets, num_boxes=None):
         """
         Args:
             predictions: Model logits (B, 1, H, W)
@@ -40,7 +40,7 @@ class FocalLoss(BaseLoss):
         self.alpha = alpha
         self.gamma = gamma
     
-    def forward(self, predictions, targets, num_boxes=None, **kwargs):
+    def forward(self, predictions, targets, num_boxes=None):
         """
         Args:
             predictions: Model logits (B, 1, H, W)
@@ -85,7 +85,7 @@ class BoundaryLoss(BaseLoss):
                                                    [1., 2., 1.]]]], dtype=torch.float32)
         self.sobel_y.weight.requires_grad = False
     
-    def forward(self, predictions, targets, num_boxes=None, **kwargs):
+    def forward(self, predictions, targets, num_boxes=None):
         """
         Args:
             predictions: Model logits (B, 1, H, W)
@@ -115,41 +115,40 @@ class BoundaryLoss(BaseLoss):
 
 class CombinedSegmentationLoss(BaseLoss):
     """Combined loss for segmentation (Focal + Dice + Boundary)."""
-    
-    def __init__(self, 
-                 focal_weight: float = 1.0,
-                 dice_weight: float = 1.0, 
-                 boundary_weight: float = 1.0,
-                 focal_alpha: float = 0.25,
-                 focal_gamma: float = 2.0):
+    def __init__(self, config):
         super().__init__(name="combined_segmentation")
-        
-        self.focal_loss = FocalLoss(alpha=focal_alpha, gamma=focal_gamma, weight=focal_weight)
-        self.dice_loss = DiceLoss(weight=dice_weight)
-        self.boundary_loss = BoundaryLoss(weight=boundary_weight)
+        self.focal_loss = FocalLoss(alpha=config.focal_alpha, gamma=config.focal_gamma, 
+                                    weight=config.focal_loss_weight)
+        self.dice_loss = DiceLoss(weight=config.dice_loss_weight)
+        # Only add boundary loss if enabled
+        self.use_boundary_loss = config.use_boundary_loss
+        self.boundary_loss = BoundaryLoss(weight=config.boundary_loss_weight)
         
         self.weights = {
-            'focal': focal_weight,
-            'dice': dice_weight,
-            'boundary': boundary_weight
-        }
-    
-    def forward(self, predictions, targets, num_boxes=None, **kwargs):
+            'focal': config.focal_loss_weight,
+            'dice': config.dice_loss_weight,
+            'boundary': config.boundary_loss_weight
+    }
+        
+    def forward(self, predictions, targets, num_boxes=None):
         """Combined segmentation loss."""
-        focal_loss = self.focal_loss(predictions, targets, num_boxes, **kwargs)
-        dice_loss = self.dice_loss(predictions, targets, num_boxes, **kwargs)
-        boundary_loss = self.boundary_loss(predictions, targets, num_boxes, **kwargs)
+        focal_loss = self.focal_loss(predictions, targets, num_boxes)
+        dice_loss = self.dice_loss(predictions, targets, num_boxes)
+        boundary_loss = 0.0
+        if self.use_boundary_loss:
+            boundary_loss = self.boundary_loss(predictions, targets, num_boxes)
         
         total_loss = focal_loss + dice_loss + boundary_loss
         
-        return total_loss
+        return {"total_loss": total_loss, 'focal_loss': focal_loss,
+                "dice_loss": dice_loss, "boundary_loss": boundary_loss}
     
-    def get_loss_components(self, predictions, targets, num_boxes=None, **kwargs):
+    def get_loss_components(self, predictions, targets, num_boxes=None):
         """Get individual loss components for logging."""
         with torch.no_grad():
-            focal_loss = self.focal_loss(predictions, targets, num_boxes, **kwargs)
-            dice_loss = self.dice_loss(predictions, targets, num_boxes, **kwargs)  
-            boundary_loss = self.boundary_loss(predictions, targets, num_boxes, **kwargs)
+            focal_loss = self.focal_loss(predictions, targets, num_boxes)
+            dice_loss = self.dice_loss(predictions, targets, num_boxes)  
+            boundary_loss = self.boundary_loss(predictions, targets, num_boxes)
         
         return {
             'focal_loss': focal_loss.item(),

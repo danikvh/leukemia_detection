@@ -7,6 +7,8 @@ from torch.utils.data import Dataset, Subset, ConcatDataset
 import random
 
 from .training_strategy import TrainingStrategy, DataSplitMixin
+from segmentation.datasets.dataset_factory import DatasetFactory
+from segmentation.transforms.composed_transforms import FullTransform
 
 
 class KFoldStrategy(TrainingStrategy, DataSplitMixin):
@@ -101,9 +103,6 @@ class KFoldStrategy(TrainingStrategy, DataSplitMixin):
             if self.use_multiple_datasets:
                 print("Adding additional TNBC dataset...")
                 try:
-                    from datasets.datasets import get_datasets
-                    from datasets.transforms import FullTransform
-                    
                     # Create transform (you might want to pass this from config)
                     transform = FullTransform(
                         normalize=config.normalize,
@@ -117,12 +116,11 @@ class KFoldStrategy(TrainingStrategy, DataSplitMixin):
                         debug=False
                     )
                     
-                    additional_dataset = get_datasets(
-                        img_folder_path="../../data/TNBC_dataset/images",
-                        mask_folder_path="../../data/TNBC_dataset/masks", 
-                        transform=transform,
-                        do_augmentation=config.augmentation,
-                        complex_augmentation=config.complex_augmentation
+                    additional_dataset = DatasetFactory().create_dataset(
+                        ("../../data/TNBC_dataset/images", "../../data/TNBC_dataset/masks"),
+                        transform = transform,
+                        do_augmentation = config.do_augmentation,
+                        complex_augmentation = config.complex_augmentation
                     )
                     
                     current_train_subset = ConcatDataset([additional_dataset, train_subset])
@@ -132,12 +130,10 @@ class KFoldStrategy(TrainingStrategy, DataSplitMixin):
                     print(f"Warning: Could not load additional dataset: {e}")
                     current_train_subset = train_subset
             
-            # Create data loaders
-            from datasets.cellsam_datasets import get_cellsam_dataloaders
-            
-            dataloaders = get_cellsam_dataloaders(
-                {'train': current_train_subset, 'val': val_subset}, 
-                batch_size=config.batch_size,
+            # Create data loaders     
+            dataloaders = DatasetFactory().create_dataloaders(
+                {'train': train_subset, 'val': val_subset}, 
+                batch_size=self.batch_size,
                 shuffle=True
             )
             

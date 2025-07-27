@@ -17,6 +17,7 @@ class Stage2Config(BaseTrainingConfig):
             "focal_loss_weight": 1.0,
             "dice_loss_weight": 1.0,
             "boundary_loss_weight": 1.0,
+            "use_boundary_loss": False,
             "focal_alpha": 0.25,
             "focal_gamma": 2.0,
             "dice_smooth": 1.0,
@@ -26,6 +27,9 @@ class Stage2Config(BaseTrainingConfig):
             "freeze_prompt_encoder": True,
             "freeze_mask_decoder": True,
             "train_neck_only": True,
+
+            # Scheduler
+            "use_scheduler": False,
 
             # OHEM
             "online_hard_negative_mining": True,

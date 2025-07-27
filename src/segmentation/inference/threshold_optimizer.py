@@ -103,7 +103,7 @@ class MetricEvaluator:
             # Run inference
             results = self.inference_engine.process_dataset(
                 self.dataset,
-                output_path="./temp_threshold_search",
+                output_path=".results/temp_threshold_search",
                 test_mode=False
             )
             

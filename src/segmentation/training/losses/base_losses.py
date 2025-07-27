@@ -19,8 +19,8 @@ class BaseLoss(nn.Module, ABC):
         """Compute the loss."""
         pass
     
-    def __call__(self, predictions, targets, **kwargs):
-        loss = self.forward(predictions, targets, **kwargs)
+    def __call__(self, *args, **kwargs):
+        loss = super().__call__(*args, **kwargs)
         return loss * self.weight
 
 

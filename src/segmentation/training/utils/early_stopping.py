@@ -2,7 +2,8 @@
 Early stopping implementation for training.
 """
 import numpy as np
-from typing import Optional, Callable, Any
+from typing import Optional, Any
+import logging
 
 
 class EarlyStopping:
@@ -12,7 +13,6 @@ class EarlyStopping:
                  patience: int = 15,
                  min_delta: float = 0.0,
                  mode: str = 'min',
-                 restore_best_weights: bool = True,
                  verbose: bool = True):
         """
         Initialize early stopping.
@@ -21,116 +21,113 @@ class EarlyStopping:
             patience: Number of epochs with no improvement to wait
             min_delta: Minimum change to qualify as improvement
             mode: 'min' for metrics that should decrease, 'max' for metrics that should increase
-            restore_best_weights: Whether to restore best weights when stopping
             verbose: Whether to print early stopping messages
         """
         self.patience = patience
-        self.min_delta = min_delta
+        self.min_delta = abs(min_delta)
         self.mode = mode
-        self.restore_best_weights = restore_best_weights
         self.verbose = verbose
         
+        # Internal state
         self.wait = 0
         self.stopped_epoch = 0
-        self.best_weights = None
+        self.best_score = None
+        self.should_stop_flag = False
         
+        # Set up comparison function based on mode
         if mode == 'min':
-            self.monitor_op = np.less
-            self.best_score = np.inf
-            self.min_delta *= -1
+            self.is_better = self._is_better_min
         elif mode == 'max':
-            self.monitor_op = np.greater
-            self.best_score = -np.inf
-            self.min_delta *= 1
+            self.is_better = self._is_better_max
         else:
             raise ValueError(f"Mode {mode} is unknown, please use 'min' or 'max'")
+        
+        # Setup logger
+        self.logger = logging.getLogger(self.__class__.__name__)
     
-    def __call__(self,
-                 current_score: float,
-                 model: Optional[Any] = None,
-                 epoch: Optional[int] = None) -> bool:
+    def _is_better_min(self, current: float, best: float) -> bool:
+        """Check if current score is better for minimization."""
+        return current < (best - self.min_delta)
+    
+    def _is_better_max(self, current: float, best: float) -> bool:
+        """Check if current score is better for maximization."""
+        return current > (best + self.min_delta)
+    
+    def update(self, current_score: float, epoch: Optional[int] = None) -> None:
+        """
+        Update early stopping state with current score.
+        
+        Args:
+            current_score: Current metric value
+            epoch: Current epoch number (for logging)
+        """
+        if self.best_score is None:
+            # First epoch
+            self.best_score = current_score
+            self.wait = 0
+            if self.verbose:
+                self.logger.info(f"Initial best score: {current_score:.6f}")
+        elif self.is_better(current_score, self.best_score):
+            # Improvement found
+            improvement = abs(current_score - self.best_score)
+            self.best_score = current_score
+            self.wait = 0
+            if self.verbose:
+                self.logger.info(f"New best score: {current_score:.6f} (improved by {improvement:.6f})")
+        else:
+            # No improvement
+            self.wait += 1
+            if self.verbose:
+                self.logger.info(
+                    f"No improvement for {self.wait}/{self.patience} epochs "
+                    f"(current: {current_score:.6f}, best: {self.best_score:.6f})"
+                )
+        
+        # Check if we should stop
+        if self.wait >= self.patience:
+            self.should_stop_flag = True
+            self.stopped_epoch = epoch if epoch is not None else self.wait
+            if self.verbose:
+                self.logger.info(
+                    f"Early stopping triggered after {self.patience} epochs without improvement. "
+                    f"Best score: {self.best_score:.6f}"
+                )
+    
+    def should_stop(self, current_score: Optional[float] = None, epoch: Optional[int] = None) -> bool:
         """
         Check if training should be stopped.
         
         Args:
-            current_score: Current metric value
-            model: Model object (for weight restoration)
+            current_score: Current metric value (if provided, will update state)
             epoch: Current epoch number
             
         Returns:
             True if training should be stopped, False otherwise
         """
-        if self.monitor_op(current_score - self.min_delta, self.best_score):
-            self.best_score = current_score
-            self.wait = 0
-            
-            # Save best weights if model is provided
-            if model is not None and self.restore_best_weights:
-                self.best_weights = self._get_model_state(model)
-            
-            if self.verbose:
-                print(f"  -> New best score: {current_score:.6f} (improved by {abs(current_score - self.best_score):.6f})")
-        else:
-            self.wait += 1
-            if self.verbose:
-                print(f"  -> No improvement for {self.wait} epochs (best: {self.best_score:.6f})")
+        if current_score is not None:
+            self.update(current_score, epoch)
         
-        # Check if we should stop
-        if self.wait >= self.patience:
-            self.stopped_epoch = epoch if epoch is not None else self.wait
-            
-            if self.verbose:
-                print(f"Early stopping triggered after {self.patience} epochs without improvement")
-                print(f"Best score was: {self.best_score:.6f}")
-            
-            # Restore best weights if requested
-            if model is not None and self.restore_best_weights and self.best_weights is not None:
-                self._restore_model_state(model, self.best_weights)
-                if self.verbose:
-                    print("Restored best model weights")
-            
-            return True
-        
-        return False
+        return self.should_stop_flag
     
-    def reset(self):
+    def reset(self) -> None:
         """Reset early stopping state."""
         self.wait = 0
         self.stopped_epoch = 0
-        self.best_weights = None
+        self.best_score = None
+        self.should_stop_flag = False
         
-        if self.mode == 'min':
-            self.best_score = np.inf
-        else:
-            self.best_score = -np.inf
+        if self.verbose:
+            self.logger.info("Early stopping state reset")
     
-    def _get_model_state(self, model):
-        """Get model state for restoration."""
-        if hasattr(model, 'state_dict'):
-            # PyTorch model
-            import torch
-            return {k: v.clone() for k, v in model.state_dict().items()}
-        elif hasattr(model, 'get_weights'):
-            # Keras model
-            return model.get_weights()
-        else:
-            # Generic case - try to copy the model
-            import copy
-            return copy.deepcopy(model)
+    def get_best_score(self) -> Optional[float]:
+        """Get the best score seen so far."""
+        return self.best_score
     
-    def _restore_model_state(self, model, weights):
-        """Restore model state."""
-        if hasattr(model, 'load_state_dict'):
-            # PyTorch model
-            model.load_state_dict(weights)
-        elif hasattr(model, 'set_weights'):
-            # Keras model
-            model.set_weights(weights)
-        else:
-            # This won't work for all cases, but it's a fallback
-            print("Warning: Could not restore model weights - unsupported model type")
+    def get_wait_count(self) -> int:
+        """Get current wait count."""
+        return self.wait
     
-    def get_info(self):
+    def get_info(self) -> dict:
         """Get information about early stopping state."""
         return {
             'patience': self.patience,
@@ -139,22 +136,22 @@ class EarlyStopping:
             'wait': self.wait,
             'best_score': self.best_score,
             'stopped_epoch': self.stopped_epoch,
-            'should_stop': self.wait >= self.patience
+            'should_stop': self.should_stop_flag
         }
 
 
 class AdaptiveEarlyStopping(EarlyStopping):
     """
     Early stopping with adaptive patience based on training progress.
+    Increases patience when improvements are getting smaller.
     """
     
     def __init__(self,
                  base_patience: int = 15,
-                 max_patience: int = 30,
+                 max_patience: int = 50,
                  patience_factor: float = 1.5,
                  min_delta: float = 0.0,
                  mode: str = 'min',
-                 restore_best_weights: bool = True,
                  verbose: bool = True):
         """
         Initialize adaptive early stopping.
@@ -165,87 +162,101 @@ class AdaptiveEarlyStopping(EarlyStopping):
             patience_factor: Factor to increase patience when improvement is slow
             min_delta: Minimum change to qualify as improvement
             mode: 'min' or 'max'
-            restore_best_weights: Whether to restore best weights
             verbose: Whether to print messages
         """
-        super().__init__(base_patience, min_delta, mode, restore_best_weights, verbose)
+        super().__init__(base_patience, min_delta, mode, verbose)
         
         self.base_patience = base_patience
         self.max_patience = max_patience
         self.patience_factor = patience_factor
-        self.improvement_history = []
+        self.score_history = []
+        self.patience_adapted = False
         
-    def __call__(self,
-                 current_score: float,
-                 model: Optional[Any] = None,
-                 epoch: Optional[int] = None) -> bool:
+    def update(self, current_score: float, epoch: Optional[int] = None) -> None:
         """
-        Check if training should be stopped with adaptive patience.
+        Update adaptive early stopping state.
         
         Args:
             current_score: Current metric value
-            model: Model object
             epoch: Current epoch number
-            
-        Returns:
-            True if training should be stopped, False otherwise
         """
-        # Track improvement
-        if len(self.improvement_history) > 0:
-            improvement = abs(current_score - self.improvement_history[-1])
-            self.improvement_history.append(current_score)
-        else:
-            self.improvement_history.append(current_score)
-            improvement = float('inf')
+        # Store score history
+        self.score_history.append(current_score)
         
-        # Adapt patience based on recent improvements
-        if len(self.improvement_history) >= 5:
-            recent_improvements = [
-                abs(self.improvement_history[i] - self.improvement_history[i-1])
-                for i in range(-4, 0)
-            ]
-            avg_improvement = np.mean(recent_improvements)
-            
-            # If improvements are getting smaller, increase patience
-            if avg_improvement < self.min_delta * 2:
-                new_patience = min(int(self.base_patience * self.patience_factor), self.max_patience)
-                if new_patience != self.patience:
-                    self.patience = new_patience
-                    if self.verbose:
-                        print(f"  -> Adapted patience to {self.patience} due to slow improvement")
+        # Adapt patience if we have enough history and haven't adapted yet
+        if len(self.score_history) >= 10 and not self.patience_adapted and self.wait > 0:
+            self._adapt_patience()
         
-        # Use parent class logic
-        return super().__call__(current_score, model, epoch)
+        # Call parent update
+        super().update(current_score, epoch)
     
-    def reset(self):
+    def _adapt_patience(self) -> None:
+        """Adapt patience based on recent score improvements."""
+        if len(self.score_history) < 10:
+            return
+        
+        # Calculate recent improvements
+        recent_scores = self.score_history[-10:]
+        improvements = []
+        
+        for i in range(1, len(recent_scores)):
+            if self.mode == 'min':
+                improvement = recent_scores[i-1] - recent_scores[i]  # Positive if score decreased
+            else:
+                improvement = recent_scores[i] - recent_scores[i-1]  # Positive if score increased
+            improvements.append(max(0, improvement))  # Only consider positive improvements
+        
+        avg_improvement = np.mean(improvements)
+        
+        # If improvements are getting very small, increase patience
+        if avg_improvement < self.min_delta * 0.5:
+            old_patience = self.patience
+            new_patience = min(int(self.patience * self.patience_factor), self.max_patience)
+            
+            if new_patience > old_patience:
+                self.patience = new_patience
+                self.patience_adapted = True
+                if self.verbose:
+                    self.logger.info(
+                        f"Adapted patience from {old_patience} to {new_patience} "
+                        f"due to slow improvement (avg: {avg_improvement:.8f})"
+                    )
+    
+    def reset(self) -> None:
         """Reset adaptive early stopping state."""
         super().reset()
         self.patience = self.base_patience
-        self.improvement_history = []
+        self.score_history = []
+        self.patience_adapted = False
 
 
 class MultiMetricEarlyStopping:
     """
     Early stopping that considers multiple metrics.
+    Useful when you want to monitor multiple validation metrics simultaneously.
     """
     
     def __init__(self,
                  metrics_config: dict,
                  patience: int = 15,
-                 require_all: bool = False,
+                 combination_mode: str = 'any',
                  verbose: bool = True):
         """
         Initialize multi-metric early stopping.
         
         Args:
             metrics_config: Dict mapping metric names to {'mode': 'min'/'max', 'weight': float}
+                          Example: {'loss': {'mode': 'min', 'weight': 1.0}, 
+                                   'accuracy': {'mode': 'max', 'weight': 0.5}}
             patience: Number of epochs to wait
-            require_all: If True, all metrics must stop improving; if False, any metric can trigger
+            combination_mode: 'any' (stop if any metric stops improving) or 
+                            'all' (stop only if all metrics stop improving) or
+                            'weighted' (use weighted combination of metrics)
             verbose: Whether to print messages
         """
         self.metrics_config = metrics_config
         self.patience = patience
-        self.require_all = require_all
+        self.combination_mode = combination_mode
         self.verbose = verbose
         
         # Create individual early stopping for each metric
@@ -254,83 +265,116 @@ class MultiMetricEarlyStopping:
             self.stoppers[metric_name] = EarlyStopping(
                 patience=patience,
                 mode=config['mode'],
-                verbose=False  # We'll handle verbose output here
+                verbose=False  # We handle verbose output centrally
             )
         
-        self.best_combined_score = float('inf') if not require_all else float('-inf')
-        self.wait = 0
+        # For weighted combination
+        if combination_mode == 'weighted':
+            self.combined_stopper = EarlyStopping(
+                patience=patience,
+                mode='max',  # We want to maximize the weighted score
+                verbose=False
+            )
         
-    def __call__(self,
-                 metrics: dict,
-                 model: Optional[Any] = None,
-                 epoch: Optional[int] = None) -> bool:
+        self.logger = logging.getLogger(self.__class__.__name__)
+    
+    def should_stop(self, metrics: dict, epoch: Optional[int] = None) -> bool:
         """
         Check if training should be stopped based on multiple metrics.
         
         Args:
             metrics: Dictionary of metric name -> value
-            model: Model object
             epoch: Current epoch number
             
         Returns:
             True if training should be stopped, False otherwise
         """
-        # Check each metric
+        # Update each metric's early stopping
         should_stop_per_metric = {}
         for metric_name, stopper in self.stoppers.items():
             if metric_name in metrics:
-                should_stop_per_metric[metric_name] = stopper(
-                    metrics[metric_name], model, epoch
+                should_stop_per_metric[metric_name] = stopper.should_stop(
+                    metrics[metric_name], epoch
                 )
             else:
-                should_stop_per_metric[metric_name] = False
+                # Missing metric - treat as no improvement
+                should_stop_per_metric[metric_name] = stopper.should_stop(None, epoch)
         
-        # Calculate combined score
-        combined_score = 0
-        for metric_name, value in metrics.items():
-            if metric_name in self.metrics_config:
-                weight = self.metrics_config[metric_name].get('weight', 1.0)
-                if self.metrics_config[metric_name]['mode'] == 'max':
-                    combined_score += value * weight
-                else:
-                    combined_score -= value * weight
-        
-        # Check if combined score improved
-        improved = False
-        if self.require_all:
-            # For 'require_all', we want the combined score to increase
-            if combined_score > self.best_combined_score:
-                self.best_combined_score = combined_score
-                improved = True
-        else:
-            # For 'any', we want at least one metric to improve
-            improved = any(not should_stop for should_stop in should_stop_per_metric.values())
-        
-        if improved:
-            self.wait = 0
-        else:
-            self.wait += 1
-        
-        # Determine if we should stop
-        if self.require_all:
-            # Stop only if ALL metrics have stopped improving
+        # Determine overall stopping decision
+        if self.combination_mode == 'any':
+            should_stop = any(should_stop_per_metric.values())
+        elif self.combination_mode == 'all':
             should_stop = all(should_stop_per_metric.values())
+        elif self.combination_mode == 'weighted':
+            # Calculate weighted score
+            weighted_score = 0
+            total_weight = 0
+            for metric_name, value in metrics.items():
+                if metric_name in self.metrics_config:
+                    config = self.metrics_config[metric_name]
+                    weight = config.get('weight', 1.0)
+                    
+                    # Normalize score based on mode
+                    if config['mode'] == 'min':
+                        # For minimization metrics, use negative value
+                        normalized_value = -value
+                    else:
+                        # For maximization metrics, use positive value
+                        normalized_value = value
+                    
+                    weighted_score += normalized_value * weight
+                    total_weight += weight
+            
+            if total_weight > 0:
+                weighted_score /= total_weight
+            
+            should_stop = self.combined_stopper.should_stop(weighted_score, epoch)
         else:
-            # Stop if ANY metric has stopped improving for too long
-            should_stop = self.wait >= self.patience
+            raise ValueError(f"Unknown combination_mode: {self.combination_mode}")
         
+        # Logging
         if self.verbose:
-            print(f"  -> Multi-metric early stopping: wait={self.wait}/{self.patience}")
+            status_strings = []
             for metric_name, value in metrics.items():
                 if metric_name in should_stop_per_metric:
-                    status = "✓" if not should_stop_per_metric[metric_name] else "✗"
-                    print(f"    {metric_name}: {value:.6f} {status}")
+                    status = "STOP" if should_stop_per_metric[metric_name] else "OK"
+                    wait = self.stoppers[metric_name].get_wait_count()
+                    status_strings.append(f"{metric_name}: {value:.6f} ({wait}/{self.patience}) [{status}]")
+            
+            self.logger.info(f"Multi-metric early stopping ({self.combination_mode}): {', '.join(status_strings)}")
+            
+            if should_stop:
+                self.logger.info("Multi-metric early stopping triggered!")
         
         return should_stop
     
-    def reset(self):
+    def reset(self) -> None:
         """Reset all early stopping states."""
         for stopper in self.stoppers.values():
             stopper.reset()
-        self.wait = 0
-        self.best_combined_score = float('inf') if not self.require_all else float('-inf')
+        
+        if hasattr(self, 'combined_stopper'):
+            self.combined_stopper.reset()
+        
+        if self.verbose:
+            self.logger.info("Multi-metric early stopping state reset")
+    
+    def get_best_scores(self) -> dict:
+        """Get best scores for all metrics."""
+        return {
+            name: stopper.get_best_score() 
+            for name, stopper in self.stoppers.items()
+        }
+    
+    def get_info(self) -> dict:
+        """Get information about all early stopping states."""
+        info = {
+            'combination_mode': self.combination_mode,
+            'patience': self.patience,
+            'metrics': {}
+        }
+        
+        for name, stopper in self.stoppers.items():
+            info['metrics'][name] = stopper.get_info()
+        
+        return info

@@ -54,17 +54,23 @@ class DETRCombinedLoss(BaseLoss):
             for k in loss_dict.keys() 
             if k in self.weight_dict
         )
-        
-        return total_loss
-    
-    def get_loss_components(self, predictions, targets):
-        """Get individual loss components for logging."""
-        loss_dict = self.criterion(predictions, targets)
-        return {
-            'ce_loss': loss_dict['loss_ce'].item(),
-            'bbox_loss': loss_dict['loss_bbox'].item(),
-            'giou_loss': loss_dict['loss_giou'].item()
+
+        result_dict = {
+            "loss_ce": loss_dict["loss_ce"],
+            "loss_bbox": loss_dict["loss_bbox"],
+            "loss_giou": loss_dict["loss_giou"],
         }
+        
+        return total_loss, result_dict
+    
+    # def get_loss_components(self, predictions, targets):
+    #     """Get individual loss components for logging."""
+    #     loss_dict = self.criterion(predictions, targets)
+    #     return {
+    #         'ce_loss': loss_dict['loss_ce'].item(),
+    #         'bbox_loss': loss_dict['loss_bbox'].item(),
+    #         'giou_loss': loss_dict['loss_giou'].item()
+    #     }
 
 
 class ClassificationLoss(BaseLoss):
