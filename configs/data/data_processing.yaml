@@ -1,0 +1,95 @@
+# Data processing parameters
+patch_size: 512
+stride: 384
+bbox_threshold: 0.19
+overlap_threshold: 0.85
+margin_ratio: 0.1
+min_annotation_area: 10.0
+max_white_threshold: 240.0
+
+# File paths
+raw_data: "/home/dan/data/ours/raw"
+processed_data: "/home/dan/data/ours/processed"
+annotations: "/home/dan/data/ours/raw/annotations"
+model_folder: "/home/dan/models"
+qp_project: "/home/dan/data/ours/raw/annotations/project.qpproj"
+
+# Model configuration
+model:
+  path: "/home/dan/models/best_model.pth"
+  device: "cuda"
+  batch_size: 8
+
+# Output configuration
+output:
+  save_masks: true
+  save_overlays: true
+  save_crops: false
+  image_format: "png"
+  compression_level: 6
+
+# Logging configuration
+logging:
+  level: "INFO"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  file: null  # Set to path for file logging
+
+# Slide processing configuration
+slides:
+  # Slides to process (if not specified via command line)
+  default_slides:
+    - name: "23B15203_CD34"
+      path: "/home/dan/data/ours/raw/Image/folder1/Binary/23B15203 CD34.svs"
+      folder: "folder1"
+      qp_index: 0
+    - name: "23B5296_CD34"
+      path: "/home/dan/data/ours/raw/Image/folder2/Binary/23B5296 CD34.svs" 
+      folder: "folder2"
+      qp_index: 1
+
+  # Processing options
+  skip_existing: true
+  use_rois: false
+  generate_mask: false
+
+# Cell classification labels
+labels:
+  cell_types:
+    "Mieloblasto CD34 negativo": 1
+    "Mieloblasto CD34 Positivo": 2
+    "Capilar cd34": 3
+    "Tejido graso": 4
+    "Eritroblasto": 5
+    "Trabecula Osea": 6
+    "Granulocito": 7
+    "Region*": 0
+    "Otros": 0
+
+  colors:
+    "Mieloblasto CD34 negativo": [255, 0, 0]
+    "Mieloblasto CD34 Positivo": [0, 255, 0]
+    "Capilar cd34": [0, 0, 255]
+    "Tejido graso": [255, 255, 0]
+    "Eritroblasto": [255, 0, 255]
+    "Trabecula Osea": [0, 255, 255]
+    "Granulocito": [255, 255, 255]
+    "Region*": [0, 0, 0]
+    "Otros": [128, 128, 128]
+
+# Transforms configuration (for CellSAM)
+transforms:
+  stain_transform: true
+  normalize: false
+  rgb_transform: false
+  eosin: 0.0
+  dab: 1.0
+  inversion: false
+  only_nuclei: false
+  gamma: 2.1
+
+# Quality control
+quality_control:
+  enable_border_filtering: true
+  enable_overlap_filtering: true
+  enable_area_filtering: true
+  enable_white_patch_skipping: true

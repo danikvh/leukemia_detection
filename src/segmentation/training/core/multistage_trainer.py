@@ -11,7 +11,6 @@ import logging
 
 from segmentation.training.core.stage1_trainer import Stage1Trainer
 from segmentation.training.core.stage2_trainer import Stage2Trainer
-from segmentation.training.config.base_config import BaseTrainingConfig
 from segmentation.training.config.stage1_config import Stage1Config
 from segmentation.training.config.stage2_config import Stage2Config
 from segmentation.training.utils.checkpoint_manager import CheckpointManager

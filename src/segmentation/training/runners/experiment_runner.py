@@ -17,7 +17,6 @@ from ..strategies.train_val_split import TrainValSplitStrategy
 from ..strategies.k_fold import KFoldStrategy
 from ..utils.metrics_tracker import FoldMetricsAggregator
 from ..utils.gpu_monitor import GPUMonitor
-from ..utils.visualization import create_training_visualizer
 
 from ...datasets.dataset_factory import get_datasets
 from ...transforms.composed_transforms import FullTransform
