@@ -35,9 +35,11 @@ class Stage1Trainer(BaseTrainer):
     ):
         super().__init__(model, config, device, output_dir, fold)
         self.stage1_config = config
+        self.device = device
         self.loss_manager = LossFactory().create_stage1_loss(config)
         
         # Stage 1 specific components
+        self.epochs = self.stage1_config.epochs_s1
         self.matcher = self.loss_manager.matcher
         
     def setup_training_components(self) -> None:

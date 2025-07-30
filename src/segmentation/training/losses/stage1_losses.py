@@ -56,23 +56,13 @@ class DETRCombinedLoss(BaseLoss):
         )
 
         result_dict = {
-            "loss_ce": loss_dict["loss_ce"],
-            "loss_bbox": loss_dict["loss_bbox"],
-            "loss_giou": loss_dict["loss_giou"],
+            "loss_ce": loss_dict["loss_ce"] * self.weight_dict["loss_ce"],
+            "loss_bbox": loss_dict["loss_bbox"] * self.weight_dict["loss_bbox"],
+            "loss_giou": loss_dict["loss_giou"] * self.weight_dict["loss_giou"],
         }
         
         return total_loss, result_dict
-    
-    # def get_loss_components(self, predictions, targets):
-    #     """Get individual loss components for logging."""
-    #     loss_dict = self.criterion(predictions, targets)
-    #     return {
-    #         'ce_loss': loss_dict['loss_ce'].item(),
-    #         'bbox_loss': loss_dict['loss_bbox'].item(),
-    #         'giou_loss': loss_dict['loss_giou'].item()
-    #     }
-
-
+  
 class ClassificationLoss(BaseLoss):
     """Cross-entropy loss for classification."""
     

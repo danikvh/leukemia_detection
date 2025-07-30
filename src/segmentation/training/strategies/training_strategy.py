@@ -10,9 +10,12 @@ from torch.utils.data import Dataset, DataLoader
 class TrainingStrategy(ABC):
     """Abstract base class for different training strategies."""
     
-    def __init__(self, name: str):
+    def __init__(self, 
+                 name: str,
+                output_name: str = "results/train_val"):
         self.name = name
         self.results = []
+        self.output_name = output_name
     
     @abstractmethod
     def prepare_data_splits(self, 

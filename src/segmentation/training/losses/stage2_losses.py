@@ -143,15 +143,18 @@ class CombinedSegmentationLoss(BaseLoss):
         return {"total_loss": total_loss, 'focal_loss': focal_loss,
                 "dice_loss": dice_loss, "boundary_loss": boundary_loss}
     
-    def get_loss_components(self, predictions, targets, num_boxes=None):
-        """Get individual loss components for logging."""
-        with torch.no_grad():
-            focal_loss = self.focal_loss(predictions, targets, num_boxes)
-            dice_loss = self.dice_loss(predictions, targets, num_boxes)  
-            boundary_loss = self.boundary_loss(predictions, targets, num_boxes)
-        
-        return {
-            'focal_loss': focal_loss.item(),
-            'dice_loss': dice_loss.item(),
-            'boundary_loss': boundary_loss.item()
-        }
+    def forward(self, predictions, targets, num_boxes=None):
+        """Combined segmentation loss."""
+        focal_loss = self.focal_loss(predictions, targets, num_boxes)
+        dice_loss = self.dice_loss(predictions, targets, num_boxes)
+        boundary_loss = self.boundary_loss(predictions, targets, num_boxes) if self.boundary_loss else 0.0
+
+        # Weighted total loss
+        total_loss = (
+            focal_loss * self.weights['focal'] +
+            dice_loss * self.weights['dice'] +
+            boundary_loss * self.weights['boundary']
+        )
+
+        return {"total_loss": total_loss, 'focal_loss': focal_loss * self.weights['focal'],
+                "dice_loss": dice_loss * self.weights['dice'], "boundary_loss": boundary_loss * self.weights['boundary']}

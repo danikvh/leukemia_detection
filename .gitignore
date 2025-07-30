@@ -2,3 +2,5 @@
 /data
 /results
 /notebooks
+/cluster
+leukemia_detection.egg-info

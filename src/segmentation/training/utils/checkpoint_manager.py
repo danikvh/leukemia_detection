@@ -37,8 +37,10 @@ class CheckpointManager:
         self.keep_best_only = keep_best_only
         self.keep_last_n = keep_last_n
         
-        # Create checkpoint directory structure
-        self.fold_dir = self.checkpoint_dir / f"fold_{fold + 1}"
+        # Determine fold directory (if using multiple folds)
+        self.fold_dir = (
+            self.checkpoint_dir if fold == 0 else self.checkpoint_dir / f"fold_{fold + 1}"
+        )
         self.fold_dir.mkdir(parents=True, exist_ok=True)
         
         # Paths for different checkpoint types

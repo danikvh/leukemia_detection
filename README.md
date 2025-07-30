@@ -63,7 +63,6 @@ The easiest way to get started is to install directly from GitHub:
 pip install git+https://github.com/danikvh/leukemia-detection.git
 ```
 
-
 ## 📊 Results
 
 This section presents key quantitative results and illustrative examples from the project, demonstrating the performance of the CellSAM model under various conditions and preprocessing strategies.
@@ -90,7 +89,7 @@ An initial evaluation of selected preprocessing strategies on a subset of the TN
 
 Results from fine-tuning CellSAM on the TNBC-Extended dataset using the Nuclear-Only preprocessing pipeline. The Nuclear-Only preprocessing, when combined with a weighted OHEM approach during Stage 2 neck training, consistently yielded the best segmentation performance.
 
-![img](https://file+.vscode-resource.vscode-cdn.net/c%3A/Users/Dani/Documents/Personal/Informatica/MUIARFID/TFM/leukemia_detection/docs/images/results_nuclearonly.png)
+![img](docs/images/results_nuclearonly.png)
 
 #### Table 3: Segmentation Performance of CellSAM Fine-tuned (H&E-Specific Two-Channel Color Deconvolution)
 

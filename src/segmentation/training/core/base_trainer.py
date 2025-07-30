@@ -35,6 +35,7 @@ class BaseTrainer(ABC):
         self.fold = fold
 
         # Training state
+        self.epochs = self.config.epochs
         self.current_epoch = 0
         self.best_loss = float('inf')
         self.best_epoch = 0
@@ -183,7 +184,9 @@ class BaseTrainer(ABC):
                 
                 # Compute loss
                 loss_dict = self.compute_loss(outputs, targets)
-                total_loss = sum(loss_dict.values())
+                
+                # Get total loss 
+                total_loss = loss_dict['total_loss']
                 
                 # Track losses
                 for key, value in loss_dict.items():
@@ -222,10 +225,10 @@ class BaseTrainer(ABC):
         self.setup_training_components()
         
         self.logger.info(
-            f"Starting training for {self.config.epochs} epochs"
+            f"Starting training for {self.epochs} epochs"
         )
         
-        for epoch in range(self.config.epochs):
+        for epoch in range(self.epochs):
             self.current_epoch = epoch
             
             # Train epoch
@@ -237,7 +240,7 @@ class BaseTrainer(ABC):
                 f"{k}: {v:.6f}" for k, v in train_losses.items()
             ])
             self.logger.info(
-                f"Epoch {epoch+1}/{self.config.epochs} - Train - {train_loss_str}"
+                f"Epoch {epoch+1}/{self.epochs} - Train - {train_loss_str}"
             )
             
             # Validation
@@ -250,7 +253,7 @@ class BaseTrainer(ABC):
                     f"{k}: {v:.6f}" for k, v in val_losses.items()
                 ])
                 self.logger.info(
-                    f"Epoch {epoch+1}/{self.config.epochs} - Val - {val_loss_str}"
+                    f"Epoch {epoch+1}/{self.epochs} - Val - {val_loss_str}"
                 )
                 
                 # Check for best model

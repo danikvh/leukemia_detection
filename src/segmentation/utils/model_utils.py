@@ -19,14 +19,13 @@ def load_cellsam_model(model_path=None, preeval=False, device=None):
     model = get_model()
 
     if preeval or model_path is None:
-        return model, device
+        return model.to(device), device
 
     if os.path.exists(model_path):
         state_dict = torch.load(model_path, map_location=device)
         model.load_state_dict(state_dict)
-        model.to(device)
         print(f"Model loaded from {model_path}")
     else:
         raise FileNotFoundError(f"Model path not found: {model_path}")
 
-    return model, device
+    return model.to(device), device

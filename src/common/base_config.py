@@ -5,6 +5,7 @@ Contains common configuration that's shared across all components.
 """
 
 import os
+import re
 import yaml
 import json
 import logging
@@ -45,7 +46,7 @@ class BaseConfig(ABC):
                     file_config = json.load(f)
                 else:
                     raise ValueError(f"Unsupported config file format: {config_path.suffix}")
-            
+
             self._update_config(self._config, file_config)
             logger.info(f"Loaded configuration from {config_file}")
             
@@ -111,6 +112,16 @@ class BaseConfig(ABC):
             config = config[k]
         
         config[keys[-1]] = value
+
+    def __setattr__(self, name, value):
+        # Redirect all attribute sets to self._config if attribute exists in config keys
+        # Allow normal setting for _config and other private attributes
+        if name == '_config' or name.startswith('_'):
+            super().__setattr__(name, value)
+        elif '_config' in self.__dict__ and name in self._config:
+            self._config[name] = value
+        else:
+            super().__setattr__(name, value)
     
     def to_dict(self) -> Dict[str, Any]:
         """Get configuration as dictionary."""

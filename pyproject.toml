@@ -3,9 +3,48 @@ requires = ["setuptools>=42", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "leukemia_detection"
+name = "leukemia-detection"
 version = "0.1.0"
-description = "Leukemia detection pipeline"
-authors = [{ name = "Your Name" }]
+description = "Deep learning models for leukemia detection in whole slide images"
+readme = "README.md"
 requires-python = ">=3.8"
-dependencies = []
+authors = [
+  { name = "Daniel Kyu Vicente Hungerbuhler", email = "danivicen@gmail.com" }
+]
+license = { text = "MIT" }
+keywords = ["leukemia", "detection", "deep-learning", "medical-imaging", "whole-slide-images", "pathology", "segmentation", "classification", "computer-vision", "healthcare", "ai"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Intended Audience :: Healthcare Industry",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Scientific/Engineering :: Medical Science Apps.",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Operating System :: OS Independent"
+]
+dependencies = [
+    "torch>=1.9.0",
+    "torchvision>=0.10.0"
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=6.0", "pytest-cov>=2.0", "black>=21.0", "flake8>=3.8", "mypy>=0.812", "pre-commit>=2.0"]
+docs = ["sphinx>=4.0", "sphinx-rtd-theme>=0.5", "sphinxcontrib-napoleon>=0.7"]
+gpu = ["torch>=1.9.0", "torchvision>=0.10.0"]
+
+[project.urls]
+"Bug Reports" = "https://github.com/yourusername/leukemia-detection/issues"
+"Source" = "https://github.com/yourusername/leukemia-detection"
+"Documentation" = "https://leukemia-detection.readthedocs.io/"
+
+[project.scripts]
+extract-patches = "scripts.extract_patches:main"
+convert-annotations = "scripts.convert_annotations:main"
+train-segmentation = "src.segmentation.training.experiment_runner:main"
+train-classification = "src.classification.trainer:main"
+leukemia-inference = "scripts.inference:main"

@@ -33,7 +33,9 @@ class Stage2Trainer(BaseTrainer):
     ):
         super().__init__(model, config, device, output_dir, fold)
         self.stage2_config = config
+        self.device = device
         self.loss_manager = CombinedSegmentationLoss(config)
+        self.epochs = self.stage2_config.epochs_s2
         
         # OHEM if enabled
         self.ohem = None
@@ -41,6 +43,8 @@ class Stage2Trainer(BaseTrainer):
             self.ohem = OnlineHardExampleMining(
                 fraction=config.ohem_fraction,
                 hard_weight=config.ohem_hard_weight,
+                min_hard_weight=config.ohem_hard_weight_min,
+                max_hard_weight=config.ohem_hard_weight_max,
                 weighted=config.online_hard_negative_mining_weighted
             )
     
@@ -224,7 +228,7 @@ class Stage2Trainer(BaseTrainer):
                 return {}, False
             
             # Get bounding box from mask
-            gt_box = masks_to_boxes(gt_mask.unsqueeze(0))
+            gt_box = masks_to_boxes(gt_mask.unsqueeze(0), self.device)
             if gt_box.numel() == 0 or torch.any(torch.isnan(gt_box)):
                 return {}, False
         
@@ -245,6 +249,10 @@ class Stage2Trainer(BaseTrainer):
         losses = self.loss_manager.forward(
             predicted_mask, gt_mask_gpu
         )
+
+        for k in list(losses.keys()):
+            if k != "total_loss":
+                losses[k] = losses[k].detach()
         
         return losses, True
     
@@ -283,29 +291,28 @@ class Stage2Trainer(BaseTrainer):
         original_w: float
     ) -> torch.Tensor:
         """Get SAM mask prediction for given box prompt."""
-        # Encode prompt
-        sparse_embeddings, _ = self.model.model.prompt_encoder(
-            points=None,
-            boxes=box_prompt,
-            masks=None
-        )
+        with torch.no_grad():  # freeze everything except neck
+            # Encode prompt
+            sparse_embeddings, _ = self.model.model.prompt_encoder(
+                points=None,
+                boxes=box_prompt,
+                masks=None
+            )
+            # Get positional encoding
+            image_pe = self.model.model.prompt_encoder.get_dense_pe()
+            # Create dummy dense embeddings
+            dense_embeddings = torch.zeros_like(image_embedding)
+
+            # Only SAM mask decoder & prompt encoder are frozen
+            low_res_mask, _ = self.model.model.mask_decoder(
+                image_embeddings=image_embedding,
+                image_pe=image_pe,
+                sparse_prompt_embeddings=sparse_embeddings,
+                dense_prompt_embeddings=dense_embeddings,
+                multimask_output=False
+            )
         
-        # Get positional encoding
-        image_pe = self.model.model.prompt_encoder.get_dense_pe()
-        
-        # Create dummy dense embeddings
-        dense_embeddings = torch.zeros_like(image_embedding)
-        
-        # Get mask prediction
-        low_res_mask, _ = self.model.model.mask_decoder(
-            image_embeddings=image_embedding,
-            image_pe=image_pe,
-            sparse_prompt_embeddings=sparse_embeddings,
-            dense_prompt_embeddings=dense_embeddings,
-            multimask_output=False
-        )
-        
-        # Postprocess to original size
+        # Postprocess to original size (no gradient needed)
         predicted_mask = self.model.model.postprocess_masks(
             low_res_mask,
             input_size=torch.tensor([original_h, original_w], device=self.device),
@@ -385,7 +392,7 @@ class Stage2Trainer(BaseTrainer):
             if not torch.any(gt_mask):
                 continue
                 
-            gt_box = masks_to_boxes(gt_mask.unsqueeze(0))
+            gt_box = masks_to_boxes(gt_mask.unsqueeze(0), self.device)
             if gt_box.numel() == 0 or torch.any(torch.isnan(gt_box)):
                 continue
             

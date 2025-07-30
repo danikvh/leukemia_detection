@@ -1,35 +1,50 @@
+# Model
 backbone_lr_ratio: 0.1
 backbone_type: cellfinder
-batch_size: 2
-bbox_loss_weight: 5.0
-ce_loss_weight: 1.0
-debug: true
-epochs: 100
-focal_alpha: 0.25
 freeze_backbone: false
+transfer_weights: false
+
+# Loss
+ce_loss_weight: 1.0
+bbox_loss_weight: 5.0
 giou_loss_weight: 2.0
-grad_clip: 1.0
+focal_alpha: 0.25
+num_classes: 2
+
+# Checkpointing
 keep_best_only: false
 keep_last_n: 3
-learning_rate: 0.0001
-log_freq: 10
-max_visualizations_per_epoch: 4
-min_delta: 1.0e-06
-num_classes: 2
+
+# Data
 num_workers: 4
-optimizer: adamw
-output_dir: ../output
-output_name: cellsam_experiment
-patience: 15
 pin_memory: true
 preeval: false
-random_seed: 42
-save_checkpoints: true
+
+# Training basics
+training_strategy: train_val_split # full_dataset, train_val_split, k_fold_cross_val
+epochs_s1: 500
+optimizer: adamw # adamw, adam, sgd
+scheduler: plateau  # plateau, cosine, step, none
+batch_size: 2
+learning_rate: 0.00001
+weight_decay: 0.0001
+grad_clip: 1.0
+
+# Early stopping
+patience: 15
+min_delta: 0.000001
+
+# Logging and output
+output_dir: ../output
+output_name: cellsam_experiment
+debug: true
+log_freq: 10
 save_freq: 25
-save_visualizations: true
-scheduler: plateau
-training_strategy: train_val_split
-transfer_weights: false
 visualization_frequency: 1
 visualize_predictions: true
-weight_decay: 0.0001
+save_checkpoints: true
+save_visualizations: true
+max_visualizations_per_epoch: 4
+
+# Reproducibility
+random_seed: 42

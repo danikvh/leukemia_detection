@@ -20,18 +20,22 @@ class OnlineHardExampleMining:
         min_kept: int = 1,
         weighted: bool = True,
         use_loss_threshold: bool = False,
-        loss_threshold_percentile: float = 75.0
+        loss_threshold_percentile: float = 75.0,
+        min_hard_weight: float = 1.2,
+        max_hard_weight: float = 2.5
     ):
         """
-        Initialize OHEM.
+        Initialize OHEM with original logic parameters.
         
         Args:
             fraction: Fraction of samples to consider as hard examples
-            hard_weight: Weight multiplier for hard examples
+            hard_weight: Weight multiplier for hard examples (used in basic mode)
             min_kept: Minimum number of examples to keep
-            weighted: Whether to use weighted sampling
+            weighted: Whether to use weighted sampling vs selection
             use_loss_threshold: Whether to use loss threshold for hard example selection
             loss_threshold_percentile: Percentile threshold for loss-based selection
+            min_hard_weight: Minimum weight for adaptive weighting
+            max_hard_weight: Maximum weight for adaptive weighting
         """
         self.fraction = fraction
         self.hard_weight = hard_weight
@@ -39,6 +43,8 @@ class OnlineHardExampleMining:
         self.weighted = weighted
         self.use_loss_threshold = use_loss_threshold
         self.loss_threshold_percentile = loss_threshold_percentile
+        self.min_hard_weight = min_hard_weight
+        self.max_hard_weight = max_hard_weight
         
         self.logger = logging.getLogger(__name__)
         
@@ -53,184 +59,159 @@ class OnlineHardExampleMining:
         batch_losses: Dict[str, torch.Tensor]
     ) -> Dict[str, torch.Tensor]:
         """
-        Apply OHEM to modify batch losses based on hard example mining.
+        Apply OHEM using the original weighted reconstruction logic.
+        
+        - Sort examples by combined_weighted (total_loss)
+        - Apply different weighting strategies based on mode
+        - Reconstruct individual loss components with weights
         
         Args:
             losses_per_sample: List of loss dictionaries for each sample
-            batch_losses: Aggregated batch losses
+            batch_losses: Aggregated batch losses (not used, reconstructed from scratch)
             
         Returns:
-            Modified batch losses with OHEM applied
+            Reconstructed batch losses with OHEM applied
         """
         if not losses_per_sample:
             return batch_losses
         
-        # Extract total losses for each sample
-        sample_losses = []
-        for sample_loss_dict in losses_per_sample:
-            total_loss = sample_loss_dict.get('total_loss', 0.0)
-            if isinstance(total_loss, torch.Tensor):
-                total_loss = total_loss.item()
-            sample_losses.append(total_loss)
-        
-        # Find hard examples
-        hard_indices = self._find_hard_examples(sample_losses)
-        
-        if not hard_indices:
-            return batch_losses
-        
-        # Apply mining strategy
+        # Apply the original OHEM logic
         if self.weighted:
-            return self._apply_weighted_mining(
-                losses_per_sample, batch_losses, hard_indices
-            )
+            return self._apply_adaptive_weighted_mining(losses_per_sample)
         else:
-            return self._apply_selection_mining(
-                losses_per_sample, batch_losses, hard_indices
-            )
+            return self._apply_basic_hard_mining(losses_per_sample)
     
-    def _find_hard_examples(self, sample_losses: List[float]) -> List[int]:
-        """
-        Find indices of hard examples based on loss values.
-        
-        Args:
-            sample_losses: List of loss values for each sample
-            
-        Returns:
-            List of indices of hard examples
-        """
-        if not sample_losses:
-            return []
-        
-        sample_losses = np.array(sample_losses)
-        n_samples = len(sample_losses)
-        
-        if self.use_loss_threshold:
-            # Use percentile-based threshold
-            threshold = np.percentile(sample_losses, self.loss_threshold_percentile)
-            hard_indices = np.where(sample_losses >= threshold)[0].tolist()
-        else:
-            # Use fraction-based selection
-            n_hard = max(self.min_kept, int(n_samples * self.fraction))
-            n_hard = min(n_hard, n_samples)  # Don't exceed total samples
-            
-            # Get indices of samples with highest losses
-            hard_indices = np.argsort(sample_losses)[-n_hard:].tolist()
-        
-        # Update statistics
-        self.hard_examples_count += len(hard_indices)
-        self.total_examples_count += n_samples
-        
-        # Store loss statistics
-        if sample_losses.size > 0:
-            self.loss_history.append({
-                'mean_loss': float(np.mean(sample_losses)),
-                'max_loss': float(np.max(sample_losses)),
-                'min_loss': float(np.min(sample_losses)),
-                'hard_examples': len(hard_indices),
-                'total_examples': n_samples
-            })
-        
-        return hard_indices
-    
-    def _apply_weighted_mining(
+    def _apply_basic_hard_mining(
         self,
-        losses_per_sample: List[Dict[str, torch.Tensor]],
-        batch_losses: Dict[str, torch.Tensor],
-        hard_indices: List[int]
+        losses_per_sample: List[Dict[str, torch.Tensor]]
     ) -> Dict[str, torch.Tensor]:
         """
-        Apply weighted mining - increase weights of hard examples.
+        Apply basic hard mining
         
-        Args:
-            losses_per_sample: Per-sample losses
-            batch_losses: Original batch losses
-            hard_indices: Indices of hard examples
-            
-        Returns:
-            Modified batch losses
+        - Sort by total loss
+        - Select top fraction as hard examples
+        - Apply hard_weight to hard examples, 1.0 to others
         """
-        n_samples = len(losses_per_sample)
+        num_prompts_processed = len(losses_per_sample)
         
-        # Create weight array
-        weights = torch.ones(n_samples, device=batch_losses['total_loss'].device)
-        weights[hard_indices] = self.hard_weight
+        # Sort by total loss (combined_weighted in original)
+        sorted_losses = sorted(
+            enumerate(losses_per_sample), 
+            key=lambda x: x[1]['total_loss'].item(), 
+            reverse=True
+        )
         
-        # Recompute weighted losses
-        modified_losses = {}
+        # Calculate number of hard examples
+        num_hard_examples = int(num_prompts_processed * self.fraction)
+        if num_hard_examples == 0 and num_prompts_processed > 0:
+            num_hard_examples = 1
         
-        for loss_name in batch_losses.keys():
-            if loss_name == 'total_loss':
-                continue
+        # Initialize accumulated losses
+        device = losses_per_sample[0]['total_loss'].device
+        accumulated_losses = {
+            'focal_loss': torch.tensor(0.0, device=device, requires_grad=True),
+            'dice_loss': torch.tensor(0.0, device=device, requires_grad=True),
+            'boundary_loss': torch.tensor(0.0, device=device, requires_grad=True),
+            'total_loss': torch.tensor(0.0, device=device, requires_grad=True)
+        }
+        
+        # Process each example with appropriate weight
+        for i, (original_idx, data) in enumerate(sorted_losses):
+            if i < num_hard_examples:  # Hard example
+                weight = self.hard_weight
+                self.hard_examples_count += 1
+            else:  # Easy example
+                weight = 1.0
             
-            # Collect per-sample losses for this loss type
-            sample_losses_tensor = []
-            for i, sample_loss_dict in enumerate(losses_per_sample):
-                if loss_name in sample_loss_dict:
-                    loss_val = sample_loss_dict[loss_name]
-                    if isinstance(loss_val, torch.Tensor):
-                        sample_losses_tensor.append(loss_val)
-                    else:
-                        sample_losses_tensor.append(torch.tensor(loss_val, device=weights.device))
-                else:
-                    sample_losses_tensor.append(torch.tensor(0.0, device=weights.device))
-            
-            if sample_losses_tensor:
-                sample_losses_tensor = torch.stack(sample_losses_tensor)
-                weighted_loss = torch.sum(sample_losses_tensor * weights) / n_samples
-                modified_losses[loss_name] = weighted_loss
+            # Accumulate weighted losses (original reconstruction logic)
+            accumulated_losses['focal_loss'] = accumulated_losses['focal_loss'] + data['focal_loss'] * weight
+            accumulated_losses['dice_loss'] = accumulated_losses['dice_loss'] + data['dice_loss'] * weight
+            accumulated_losses['boundary_loss'] = accumulated_losses['boundary_loss'] + data['boundary_loss'] * weight
+            accumulated_losses['total_loss'] = accumulated_losses['total_loss'] + data['total_loss'] * weight
         
-        # Recompute total loss
-        modified_losses['total_loss'] = sum(modified_losses.values())
+        # Average over number of samples
+        for key in accumulated_losses:
+            accumulated_losses[key] = accumulated_losses[key] / num_prompts_processed
         
-        return modified_losses
+        self.total_examples_count += num_prompts_processed
+        return accumulated_losses
     
-    def _apply_selection_mining(
+    def _apply_adaptive_weighted_mining(
         self,
-        losses_per_sample: List[Dict[str, torch.Tensor]],
-        batch_losses: Dict[str, torch.Tensor],
-        hard_indices: List[int]
+        losses_per_sample: List[Dict[str, torch.Tensor]]
     ) -> Dict[str, torch.Tensor]:
         """
-        Apply selection mining - only use hard examples for loss computation.
+        Apply adaptive weighted mining
         
-        Args:
-            losses_per_sample: Per-sample losses
-            batch_losses: Original batch losses
-            hard_indices: Indices of hard examples
-            
-        Returns:
-            Modified batch losses using only hard examples
+        - Sort by total loss
+        - Calculate adaptive weights based on loss magnitude within hard set
+        - Apply normalized weighting between min_hard_weight and max_hard_weight
         """
-        if not hard_indices:
-            return batch_losses
+        num_prompts_processed = len(losses_per_sample)
         
-        # Recompute losses using only hard examples
-        modified_losses = {}
+        # Sort by total loss (combined_weighted in original)
+        sorted_losses = sorted(
+            enumerate(losses_per_sample), 
+            key=lambda x: x[1]['total_loss'].item(), 
+            reverse=True
+        )
         
-        for loss_name in batch_losses.keys():
-            if loss_name == 'total_loss':
-                continue
+        # Calculate number of examples to consider for adaptive weighting
+        num_prompts_to_consider = int(num_prompts_processed * self.fraction)
+        if num_prompts_to_consider == 0 and num_prompts_processed > 0:
+            num_prompts_to_consider = 1
+        
+        # Get loss values of the selected fraction for scaling
+        hard_example_losses = [
+            sorted_losses[i][1]['total_loss'].item() 
+            for i in range(min(num_prompts_to_consider, len(sorted_losses)))
+        ]
+        
+        min_loss_in_hard_set = min(hard_example_losses) if hard_example_losses else 0
+        max_loss_in_hard_set = max(hard_example_losses) if hard_example_losses else 0
+        
+        # Initialize accumulated losses
+        device = losses_per_sample[0]['total_loss'].device
+        accumulated_losses = {
+            'focal_loss': torch.tensor(0.0, device=device, requires_grad=True),
+            'dice_loss': torch.tensor(0.0, device=device, requires_grad=True),
+            'boundary_loss': torch.tensor(0.0, device=device, requires_grad=True),
+            'total_loss': torch.tensor(0.0, device=device, requires_grad=True)
+        }
+        
+        # Process each example with adaptive weight
+        for i, (original_idx, data) in enumerate(sorted_losses):
+            weight_multiplier = 1.0  # Default weight for "easy" examples
             
-            # Collect losses from hard examples only
-            hard_losses = []
-            for idx in hard_indices:
-                if idx < len(losses_per_sample) and loss_name in losses_per_sample[idx]:
-                    loss_val = losses_per_sample[idx][loss_name]
-                    if isinstance(loss_val, torch.Tensor):
-                        hard_losses.append(loss_val)
-                    else:
-                        hard_losses.append(torch.tensor(loss_val, device=batch_losses['total_loss'].device))
+            if i < num_prompts_to_consider:  # This is a "hard" example
+                if max_loss_in_hard_set > min_loss_in_hard_set:  # Avoid division by zero
+                    # Normalize badness within the hard set (0 for least hard, 1 for most hard)
+                    normalized_badness = (
+                        data['total_loss'].item() - min_loss_in_hard_set
+                    ) / (max_loss_in_hard_set - min_loss_in_hard_set)
+                elif max_loss_in_hard_set > 0:  # All hard examples have same loss
+                    normalized_badness = 0.5
+                else:  # All losses are zero or negative
+                    normalized_badness = 0.0
+                
+                weight_multiplier = (
+                    self.min_hard_weight + 
+                    (self.max_hard_weight - self.min_hard_weight) * normalized_badness
+                )
+                self.hard_examples_count += 1
             
-            if hard_losses:
-                modified_losses[loss_name] = torch.stack(hard_losses).mean()
-            else:
-                modified_losses[loss_name] = batch_losses[loss_name]
+            # Accumulate weighted losses (exact original logic)
+            accumulated_losses['focal_loss'] = accumulated_losses['focal_loss'] + data['focal_loss'] * weight_multiplier
+            accumulated_losses['dice_loss'] = accumulated_losses['dice_loss'] + data['dice_loss'] * weight_multiplier
+            accumulated_losses['boundary_loss'] = accumulated_losses['boundary_loss'] + data['boundary_loss'] * weight_multiplier
+            accumulated_losses['total_loss'] = accumulated_losses['total_loss'] + data['total_loss'] * weight_multiplier
         
-        # Recompute total loss
-        modified_losses['total_loss'] = sum(modified_losses.values())
+        # Average over number of samples
+        for key in accumulated_losses:
+            accumulated_losses[key] = accumulated_losses[key] / num_prompts_processed
         
-        return modified_losses
+        self.total_examples_count += num_prompts_processed
+        return accumulated_losses
     
     def get_mining_statistics(self) -> Dict[str, Any]:
         """Get statistics about the mining process."""
@@ -253,14 +234,18 @@ class OnlineHardExampleMining:
     def update_parameters(
         self, 
         fraction: Optional[float] = None,
-        hard_weight: Optional[float] = None
+        hard_weight: Optional[float] = None,
+        min_hard_weight: Optional[float] = None,
+        max_hard_weight: Optional[float] = None
     ) -> None:
         """
         Update OHEM parameters during training.
         
         Args:
             fraction: New fraction of hard examples
-            hard_weight: New weight for hard examples
+            hard_weight: New weight for hard examples (basic mode)
+            min_hard_weight: New minimum weight for adaptive mode
+            max_hard_weight: New maximum weight for adaptive mode
         """
         if fraction is not None:
             self.fraction = max(0.0, min(1.0, fraction))
@@ -269,246 +254,12 @@ class OnlineHardExampleMining:
         if hard_weight is not None:
             self.hard_weight = max(1.0, hard_weight)
             self.logger.info(f"Updated OHEM hard weight to {self.hard_weight}")
+        
+        if min_hard_weight is not None:
+            self.min_hard_weight = max(1.0, min_hard_weight)
+            self.logger.info(f"Updated OHEM min hard weight to {self.min_hard_weight}")
+        
+        if max_hard_weight is not None:
+            self.max_hard_weight = max(self.min_hard_weight, max_hard_weight)
+            self.logger.info(f"Updated OHEM max hard weight to {self.max_hard_weight}")
 
-
-class AdaptiveOHEM(OnlineHardExampleMining):
-    """
-    Adaptive OHEM that adjusts parameters based on training progress.
-    """
-    
-    def __init__(
-        self,
-        initial_fraction: float = 0.25,
-        final_fraction: float = 0.1,
-        initial_hard_weight: float = 2.0,
-        final_hard_weight: float = 1.5,
-        adaptation_epochs: int = 50,
-        **kwargs
-    ):
-        """
-        Initialize adaptive OHEM.
-        
-        Args:
-            initial_fraction: Starting fraction of hard examples
-            final_fraction: Final fraction of hard examples
-            initial_hard_weight: Starting weight for hard examples
-            final_hard_weight: Final weight for hard examples
-            adaptation_epochs: Number of epochs over which to adapt
-        """
-        super().__init__(fraction=initial_fraction, hard_weight=initial_hard_weight, **kwargs)
-        
-        self.initial_fraction = initial_fraction
-        self.final_fraction = final_fraction
-        self.initial_hard_weight = initial_hard_weight
-        self.final_hard_weight = final_hard_weight
-        self.adaptation_epochs = adaptation_epochs
-        
-        self.current_epoch = 0
-    
-    def step_epoch(self, epoch: int) -> None:
-        """
-        Update OHEM parameters based on current epoch.
-        
-        Args:
-            epoch: Current training epoch
-        """
-        self.current_epoch = epoch
-        
-        if epoch >= self.adaptation_epochs:
-            # Use final parameters
-            new_fraction = self.final_fraction
-            new_hard_weight = self.final_hard_weight
-        else:
-            # Linear interpolation between initial and final parameters
-            progress = epoch / self.adaptation_epochs
-            
-            new_fraction = (
-                self.initial_fraction + 
-                progress * (self.final_fraction - self.initial_fraction)
-            )
-            
-            new_hard_weight = (
-                self.initial_hard_weight + 
-                progress * (self.final_hard_weight - self.initial_hard_weight)
-            )
-        
-        # Update parameters if they changed significantly
-        if abs(new_fraction - self.fraction) > 0.01:
-            self.fraction = new_fraction
-            self.logger.info(f"Epoch {epoch}: Adapted OHEM fraction to {self.fraction:.3f}")
-        
-        if abs(new_hard_weight - self.hard_weight) > 0.05:
-            self.hard_weight = new_hard_weight
-            self.logger.info(f"Epoch {epoch}: Adapted OHEM hard weight to {self.hard_weight:.3f}")
-
-
-class CurriculumOHEM(OnlineHardExampleMining):
-    """
-    Curriculum learning with OHEM - gradually increase difficulty.
-    """
-    
-    def __init__(
-        self,
-        curriculum_schedule: List[Dict[str, Any]],
-        **kwargs
-    ):
-        """
-        Initialize curriculum OHEM.
-        
-        Args:
-            curriculum_schedule: List of curriculum stages with epoch ranges and parameters
-                Example: [
-                    {'epochs': (0, 20), 'fraction': 0.1, 'hard_weight': 1.2},
-                    {'epochs': (20, 50), 'fraction': 0.25, 'hard_weight': 1.5},
-                    {'epochs': (50, 100), 'fraction': 0.4, 'hard_weight': 2.0}
-                ]
-        """
-        super().__init__(**kwargs)
-        self.curriculum_schedule = curriculum_schedule
-        self.current_epoch = 0
-    
-    def step_epoch(self, epoch: int) -> None:
-        """Update parameters based on curriculum schedule."""
-        self.current_epoch = epoch
-        
-        # Find current curriculum stage
-        current_stage = None
-        for stage in self.curriculum_schedule:
-            start_epoch, end_epoch = stage['epochs']
-            if start_epoch <= epoch < end_epoch:
-                current_stage = stage
-                break
-        
-        if current_stage is None:
-            # Use last stage if beyond schedule
-            current_stage = self.curriculum_schedule[-1]
-        
-        # Update parameters
-        new_fraction = current_stage.get('fraction', self.fraction)
-        new_hard_weight = current_stage.get('hard_weight', self.hard_weight)
-        
-        if abs(new_fraction - self.fraction) > 0.01:
-            self.fraction = new_fraction
-            self.logger.info(f"Epoch {epoch}: Curriculum updated OHEM fraction to {self.fraction:.3f}")
-        
-        if abs(new_hard_weight - self.hard_weight) > 0.05:
-            self.hard_weight = new_hard_weight
-            self.logger.info(f"Epoch {epoch}: Curriculum updated OHEM hard weight to {self.hard_weight:.3f}")
-
-
-class MultiScaleOHEM:
-    """
-    Multi-scale OHEM for handling examples at different difficulty scales.
-    """
-    
-    def __init__(
-        self,
-        scale_configs: Dict[str, Dict[str, Any]]
-    ):
-        """
-        Initialize multi-scale OHEM.
-        
-        Args:
-            scale_configs: Dictionary mapping scale names to OHEM configurations
-                Example: {
-                    'easy': {'fraction': 0.1, 'hard_weight': 1.1},
-                    'medium': {'fraction': 0.3, 'hard_weight': 1.5},
-                    'hard': {'fraction': 0.6, 'hard_weight': 2.0}
-                }
-        """
-        self.ohem_instances = {}
-        
-        for scale_name, config in scale_configs.items():
-            self.ohem_instances[scale_name] = OnlineHardExampleMining(**config)
-        
-        self.logger = logging.getLogger(__name__)
-    
-    def apply_mining(
-        self,
-        losses_per_sample: List[Dict[str, torch.Tensor]],
-        batch_losses: Dict[str, torch.Tensor],
-        difficulty_scores: List[float]
-    ) -> Dict[str, torch.Tensor]:
-        """
-        Apply multi-scale OHEM based on difficulty scores.
-        
-        Args:
-            losses_per_sample: Per-sample losses
-            batch_losses: Batch losses
-            difficulty_scores: Difficulty score for each sample
-            
-        Returns:
-            Modified batch losses
-        """
-        if not difficulty_scores or len(difficulty_scores) != len(losses_per_sample):
-            # Fallback to regular OHEM if no difficulty scores
-            if self.ohem_instances:
-                first_ohem = next(iter(self.ohem_instances.values()))
-                return first_ohem.apply_mining(losses_per_sample, batch_losses)
-            return batch_losses
-        
-        # Categorize samples by difficulty
-        difficulty_thresholds = self._compute_difficulty_thresholds(difficulty_scores)
-        
-        categorized_samples = {scale: [] for scale in self.ohem_instances.keys()}
-        scale_names = list(self.ohem_instances.keys())
-        
-        for i, score in enumerate(difficulty_scores):
-            # Assign to appropriate scale based on thresholds
-            assigned_scale = scale_names[-1]  # Default to hardest scale
-            
-            for j, threshold in enumerate(difficulty_thresholds[:-1]):
-                if score <= threshold:
-                    assigned_scale = scale_names[j]
-                    break
-            
-            categorized_samples[assigned_scale].append(i)
-        
-        # Apply OHEM for each scale and combine results
-        combined_losses = {}
-        total_samples = len(losses_per_sample)
-        
-        for scale_name, sample_indices in categorized_samples.items():
-            if not sample_indices:
-                continue
-            
-            # Extract losses for this scale
-            scale_losses = [losses_per_sample[i] for i in sample_indices]
-            
-            # Create temporary batch losses for this scale
-            scale_batch_losses = {}
-            for loss_name, loss_value in batch_losses.items():
-                # Weight by number of samples in this scale
-                scale_weight = len(sample_indices) / total_samples
-                scale_batch_losses[loss_name] = loss_value * scale_weight
-            
-            # Apply OHEM for this scale
-            ohem_instance = self.ohem_instances[scale_name]
-            modified_scale_losses = ohem_instance.apply_mining(scale_losses, scale_batch_losses)
-            
-            # Combine with overall losses
-            for loss_name, loss_value in modified_scale_losses.items():
-                if loss_name not in combined_losses:
-                    combined_losses[loss_name] = loss_value
-                else:
-                    combined_losses[loss_name] += loss_value
-        
-        return combined_losses if combined_losses else batch_losses
-    
-    def _compute_difficulty_thresholds(self, difficulty_scores: List[float]) -> List[float]:
-        """Compute thresholds for categorizing difficulty levels."""
-        scores_array = np.array(difficulty_scores)
-        n_scales = len(self.ohem_instances)
-        
-        # Use quantiles to define thresholds
-        quantiles = np.linspace(0, 100, n_scales + 1)[1:]  # Exclude 0, include 100
-        thresholds = [np.percentile(scores_array, q) for q in quantiles]
-        
-        return thresholds
-    
-    def get_mining_statistics(self) -> Dict[str, Dict[str, Any]]:
-        """Get statistics for all OHEM instances."""
-        return {
-            scale_name: ohem.get_mining_statistics()
-            for scale_name, ohem in self.ohem_instances.items()
-        }

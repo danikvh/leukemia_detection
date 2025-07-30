@@ -8,59 +8,63 @@ from pathlib import Path
 from typing import Dict, Any, Optional, List
 from dataclasses import asdict
 
-from ..config.stage1_config import Stage1Config
-from ..config.stage2_config import Stage2Config
-from ..core.multi_stage_trainer import MultiStageTrainer
-from ..strategies.training_strategy import TrainingStrategy
-from ..strategies.full_dataset import FullDatasetStrategy
-from ..strategies.train_val_split import TrainValSplitStrategy
-from ..strategies.k_fold import KFoldStrategy
-from ..utils.metrics_tracker import FoldMetricsAggregator
-from ..utils.gpu_monitor import GPUMonitor
+from segmentation.training.config.stage1_config import Stage1Config
+from segmentation.training.config.stage2_config import Stage2Config
+from segmentation.training.core.multistage_trainer import MultiStageTrainer
+from segmentation.training.strategies.training_strategy import TrainingStrategy
+from segmentation.training.strategies.full_dataset import FullDatasetStrategy
+from segmentation.training.strategies.train_val_split import TrainValSplitStrategy
+from segmentation.training.strategies.k_fold import KFoldStrategy
+from segmentation.training.utils.metrics_tracker import FoldMetricsAggregator
+from segmentation.training.utils.gpu_monitoring import GPUMonitor
 
-from ...datasets.dataset_factory import get_datasets
-from ...transforms.composed_transforms import FullTransform
+from segmentation.datasets.dataset_factory import get_datasets
+from segmentation.datasets.config import DatasetConfig
+from segmentation.datasets.dataset_factory import DatasetFactory
+from segmentation.transforms.composed_transforms import FullTransform
 
 
 class ExperimentConfig:
     """Configuration for a complete experiment."""
     
     def __init__(self,
-                 # Data configuration
-                 img_path: str,
-                 mask_path: str,
-                 output_name: str,
-                 
-                 # Training strategy
-                 strategy: str = "k_fold",  # "full_dataset", "train_val_split", "k_fold"
-                 k_folds: int = 5,
-                 
-                 # Stage configurations
-                 stage1_config: Optional[Stage1Config] = None,
-                 stage2_config: Optional[Stage2Config] = None,
-                 
-                 # General training parameters
-                 batch_size: int = 1,
-                 debug: bool = False,
-                 preeval: bool = False,
-                 test: bool = False,
-                 
-                 # Transform parameters
-                 normalize: bool = False,
-                 rgb_transform: bool = False,
-                 stain_transform: bool = True,
-                 eosin: float = 0.0,
-                 dab: float = 0.0,
-                 inversion: bool = True,
-                 only_nuclei: bool = True,
-                 gamma: float = 2.1,
-                 normalize_inf: bool = True,
-                 augmentation: bool = False,
-                 complex_augmentation: bool = False,
-                 
-                 # Multi-dataset training
-                 multiple_datasets: bool = False,
-                 additional_datasets: Optional[List[Dict[str, str]]] = None):
+            # Data configuration
+            img_path: str,
+            mask_path: str,
+            output_name: str,
+            
+            # Training strategy
+            strategy: str = "k_fold",  # "full_dataset", "train_val_split", "k_fold"
+            k_folds: int = 5,
+            
+            # Configurations
+            dataset_config: Optional[DatasetConfig] = None,
+            stage1_config: Optional[Stage1Config] = None,
+            stage2_config: Optional[Stage2Config] = None,
+            
+            # General training parameters
+            batch_size: int = 1,
+            debug: bool = False,
+            preeval: bool = False,
+            test: bool = False,
+            
+            # Transform parameters
+            normalize: bool = False,
+            rgb_transform: bool = False,
+            stain_transform: bool = True,
+            eosin: float = 0.0,
+            dab: float = 0.0,
+            inversion: bool = True,
+            only_nuclei: bool = True,
+            gamma: float = 2.1,
+            normalize_inf: bool = True,
+            augmentation: bool = False,
+            complex_augmentation: bool = False,
+            
+            # Multi-dataset training
+            multiple_datasets: bool = False,
+            additional_datasets: Optional[List[Dict[str, str]]] = None
+            ):
         
         self.img_path = img_path
         self.mask_path = mask_path
@@ -69,6 +73,7 @@ class ExperimentConfig:
         self.k_folds = k_folds
         
         # Use provided configs or create defaults
+        self.dataset_config = dataset_config or DatasetConfig()
         self.stage1_config = stage1_config or Stage1Config()
         self.stage2_config = stage2_config or Stage2Config()
         
@@ -78,19 +83,17 @@ class ExperimentConfig:
         self.test = test
         
         # Transform parameters
-        self.transform_params = {
-            'normalize': normalize,
-            'rgb_transform': rgb_transform,
-            'stain_transform': stain_transform,
-            'eosin': eosin,
-            'dab': dab,
-            'inversion': inversion,
-            'only_nuclei': only_nuclei,
-            'gamma': gamma,
-            'normalize_inf': normalize_inf,
-            'augmentation': augmentation,
-            'complex_augmentation': complex_augmentation
-        }
+        self.transform = FullTransform(
+            normalize=dataset_config.normalize, 
+            rgb_transform=dataset_config.rgb_transform, 
+            stain_transform=dataset_config.stain_transform,
+            eosin=dataset_config.eosin,
+            dab=dataset_config.dab, 
+            inversion=dataset_config.inversion, 
+            only_nuclei=dataset_config.only_nuclei, 
+            gamma=dataset_config.gamma, 
+            debug=dataset_config.debug
+        )
         
         self.multiple_datasets = multiple_datasets
         self.additional_datasets = additional_datasets or []
@@ -105,11 +108,12 @@ class ExperimentConfig:
             'k_folds': self.k_folds,
             'stage1_config': asdict(self.stage1_config),
             'stage2_config': asdict(self.stage2_config),
+            'dataset_config': asdict(self.dataset_config),
             'batch_size': self.batch_size,
             'debug': self.debug,
             'preeval': self.preeval,
             'test': self.test,
-            'transform_params': self.transform_params,
+            'transform': self.transform,
             'multiple_datasets': self.multiple_datasets,
             'additional_datasets': self.additional_datasets
         }
@@ -169,45 +173,10 @@ class ExperimentRunner:
         
         return logger
     
-    def _create_datasets(self) -> tuple:
-        """Create training and validation datasets."""
-        # Create transform
-        transform = FullTransform(**self.config.transform_params)
-        
-        # Create main dataset
-        train_dataset = get_datasets(
-            img_folder_path=self.config.img_path,
-            mask_folder_path=self.config.mask_path,
-            transform=transform,
-            do_augmentation=self.config.transform_params['augmentation'],
-            complex_augmentation=self.config.transform_params['complex_augmentation']
-        )
-        
-        # Create validation dataset (without augmentation)
-        val_transform = FullTransform(**{
-            **self.config.transform_params,
-            'augmentation': False,
-            'complex_augmentation': False
-        })
-        
-        val_dataset = get_datasets(
-            img_folder_path=self.config.img_path,
-            mask_folder_path=self.config.mask_path,
-            transform=val_transform
-        )
-        
-        self.logger.info(f"Created datasets - Train: {len(train_dataset)}, Val: {len(val_dataset)}")
-        
-        return train_dataset, val_dataset
-    
-    def _create_training_strategy(self, train_dataset, val_dataset) -> TrainingStrategy:
+    def _create_training_strategy(self) -> TrainingStrategy:
         """Create the appropriate training strategy."""
         strategy_kwargs = {
-            'train_dataset': train_dataset,
-            'val_dataset': val_dataset,
-            'batch_size': self.config.batch_size,
-            'output_dir': str(self.output_dir),
-            'config': self.config
+            'output_name': str(self.output_dir)
         }
         
         if self.config.strategy == "full_dataset":
@@ -305,13 +274,21 @@ class ExperimentRunner:
         
         try:
             # Create datasets
-            train_dataset, val_dataset = self._create_datasets()
-            
-            # Run pre-evaluation if requested
-            preeval_results = self._run_preeval(val_dataset)
-            
+            dataset = DatasetFactory().create_dataset(
+                (self.dataset_config.img_path, 
+                 self.dataset_config.mask_path),
+                transform = self.transform,
+                do_augmentation = self.dataset_config.do_augmentation,
+                complex_augmentation = self.dataset_config.complex_augmentation
+            )
+
             # Create training strategy
             training_strategy = self._create_training_strategy(train_dataset, val_dataset)
+            
+
+
+            # Run pre-evaluation if requested
+            preeval_results = self._run_preeval(val_dataset)
             
             self.logger.info(f"Using training strategy: {type(training_strategy).__name__}")
             

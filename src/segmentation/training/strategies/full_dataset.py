@@ -13,8 +13,15 @@ from segmentation.datasets.dataset_factory import DatasetFactory
 class FullDatasetStrategy(TrainingStrategy):
     """Training strategy using the full dataset without validation."""
     
-    def __init__(self):
-        super().__init__(name="full_dataset")
+    def __init__(
+            self,
+            random_seed: int = 23,
+            batch_size: int = 2,
+            output_name: str = "results/train_val"):
+        super().__init__(name="full_dataset", output_name="")
+        self.output_name = output_name
+        self.random_seed = random_seed
+        self.batch_size = batch_size
     
     def prepare_data_splits(self, 
                           train_dataset: Dataset, 
@@ -45,7 +52,6 @@ class FullDatasetStrategy(TrainingStrategy):
     def execute_training(self, 
                         trainer,
                         data_splits: List[Tuple[Dataset, Dataset]],
-                        config,
                         **kwargs) -> List[Dict[str, Any]]:
         """
         Execute full dataset training.
@@ -53,7 +59,6 @@ class FullDatasetStrategy(TrainingStrategy):
         Args:
             trainer: Multi-stage trainer instance
             data_splits: List with single (train, val) split
-            config: Training configuration
             **kwargs: Additional parameters
             
         Returns:
@@ -85,10 +90,7 @@ class FullDatasetStrategy(TrainingStrategy):
         # Execute training
         result = trainer.train(
             train_loader=train_loader,
-            val_loader=val_loader,
-            val_dataset=val_dataset_for_eval,
-            fold_idx=0,
-            config=config
+            val_loader=val_loader
         )
         
         self.results = [result]
@@ -96,11 +98,11 @@ class FullDatasetStrategy(TrainingStrategy):
         # Save results
         import os
         import json
-        output_dir = f"../output/{config.output_name}/results"
+        output_dir = self.output_name
         os.makedirs(output_dir, exist_ok=True)
         
         with open(f"{output_dir}/full_training_results.json", "w") as f:
-            json.dump(result, f, indent=4)
+            json.dump(self.results, f, indent=4)
         
         print(f"Full dataset training completed. Results saved to {output_dir}")
         

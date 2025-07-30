@@ -1,44 +1,59 @@
-batch_size: 2
-boundary_loss_weight: 1.0
-debug: true
-dice_loss_weight: 1.0
-dice_smooth: 1.0
-epochs: 100
-focal_alpha: 0.25
-focal_gamma: 2.0
-focal_loss_weight: 1.0
+# Model
+train_neck_only: true
 freeze_image_encoder: true
 freeze_mask_decoder: true
 freeze_prompt_encoder: true
-grad_clip: 1.0
+
+# Loss
+focal_loss_weight: 100.0
+dice_loss_weight: 1.0
+boundary_loss_weight: 1.0
+focal_alpha: 0.25
+focal_gamma: 2.0
+dice_smooth: 1.0
+use_boundary_loss: false
+
+# Checkpointing
 keep_best_only: false
 keep_last_n: 3
-learning_rate: 0.0001
-log_freq: 10
-max_visualizations_per_epoch: 4
-min_delta: 1.0e-06
+
+# Data
 num_workers: 4
+pin_memory: true
+preeval: false
+
+# Training basics
+training_strategy: train_val_split
+epochs_s2: 500
+batch_size: 2
+use_scheduler: false
+scheduler: plateau
+optimizer: adamw
+learning_rate: 0.00001
+weight_decay: 0.0001
 ohem_fraction: 0.1
 ohem_hard_weight: 2.0
 ohem_hard_weight_max: 2.5
 ohem_hard_weight_min: 1.2
 online_hard_negative_mining: true
 online_hard_negative_mining_weighted: true
-optimizer: adamw
+grad_clip: 1.0
+
+# Early stopping
+patience: 15
+min_delta: 0.000001
+
+# Logging and output
 output_dir: ../output
 output_name: cellsam_experiment
-patience: 15
-pin_memory: true
-preeval: false
-random_seed: 42
-save_checkpoints: true
+debug: true
+log_freq: 10
 save_freq: 25
-save_visualizations: true
-scheduler: plateau
-train_neck_only: true
-training_strategy: train_val_split
-use_boundary_loss: false
-use_scheduler: false
 visualization_frequency: 2
 visualize_masks: true
-weight_decay: 0.0001
+save_checkpoints: true
+save_visualizations: true
+max_visualizations_per_epoch: 4
+
+# Reproducibility
+random_seed: 42
