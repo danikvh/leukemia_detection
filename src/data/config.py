@@ -42,6 +42,7 @@ class DataProcessingConfig(BaseConfig):
             # Model inference
             'bbox_threshold': 0.19,
             'generate_masks': False,
+            'generate_mask': False,
             'use_rois': False,
             'save_masks': True,
             
@@ -67,3 +68,10 @@ class DataProcessingConfig(BaseConfig):
                 'negativo': 'negative'
             }
         }
+    
+    def to_dict(self):
+        # If it stores everything in _config
+        if hasattr(self, "_config"):
+            return dict(self._config)
+        # Otherwise, dump all public attributes
+        return {k: v for k, v in self.__dict__.items() if not k.startswith("_")}

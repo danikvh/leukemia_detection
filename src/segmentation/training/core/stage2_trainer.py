@@ -250,6 +250,7 @@ class Stage2Trainer(BaseTrainer):
             predicted_mask, gt_mask_gpu
         )
 
+        # Detach individual losses to free GPU, total loss is used for backprop
         for k in list(losses.keys()):
             if k != "total_loss":
                 losses[k] = losses[k].detach()

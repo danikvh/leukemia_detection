@@ -6,7 +6,7 @@ This script provides command-line interface for processing WSI files,
 extracting annotations, and converting between formats.
 
 Examples:
-    - python .\data_processing.py --output-dir ../data/lafe/processed/processed_cellsam extract-patches --svs-dir ../data/lafe/raw/Image --qupath-project ../data/lafe/raw/annotations/project.qpproj --generate-mask
+    - python .\data_processing.py extract-patches --output-dir ../data/lafe/processed/processed_cellsam --svs-dir ../data/lafe/raw/Image --qupath-project ../data/lafe/raw/annotations/project.qpproj --generate-mask
 
     - python .\data_processing.py --output-dir ../data/lafe/processed/processed_annotations extract-annotations --svs-dir ../data/lafe/raw/Image --geojson-dir ../data/lafe/annotations/iteration2
 
@@ -29,7 +29,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 from data.annotation_extractor import AnnotationExtractor, merge_cell_label_csvs
 from data.wsi_processor import WSIProcessor
 from data.mask_converter import MaskToAnnotationConverter
-from data.geojson_processor import GeoJSONProcessor
 from data.config import DataProcessingConfig
 from segmentation.utils.model_utils import load_cellsam_model
 from common.utilities import setup_logging
@@ -68,7 +67,7 @@ Examples:
         default="INFO", help="Logging level"
     )
     parser.add_argument(
-        "--output-dir", type=str, required=True,
+        "--output-dir", type=str,
         help="Output directory for processed data"
     )
     
@@ -80,10 +79,10 @@ Examples:
         "extract-patches", help="Extract patches from WSI files"
     )
     extract_parser.add_argument(
-        "--svs-dir", type=str, required=True, help="Directory containing SVS files"
+        "--svs-dir", type=str, help="Directory containing SVS files"
     )
     extract_parser.add_argument(
-        "--qupath-project", type=str, required=True, help="Path to QuPath project file"
+        "--qupath-project", type=str, help="Path to QuPath project file"
     )
     extract_parser.add_argument(
         "--patch-size", type=int, default=512,
@@ -98,11 +97,11 @@ Examples:
         help="Generate masks using trained model"
     )
     extract_parser.add_argument(
-        "--model-path", type=str, default=None,
+        "--model-path", type=str, 
         help="Path to trained model for mask generation"
     )
     extract_parser.add_argument(
-        "--bbox-threshold", type=float, default=0.19,
+        "--bbox-threshold", type=float,
         help="Bounding box threshold for model inference"
     )
     extract_parser.add_argument(
@@ -119,11 +118,11 @@ Examples:
         "extract-annotations", help="Extract annotations from GeoJSON files"
     )
     annotations_parser.add_argument(
-        "--svs-dir", type=str, required=True,
+        "--svs-dir", type=str,
         help="Directory containing SVS files"
     )
     annotations_parser.add_argument(
-        "--geojson-dir", type=str, required=True,
+        "--geojson-dir", type=str,
         help="Directory containing GeoJSON annotation files"
     )
     annotations_parser.add_argument(
@@ -133,44 +132,6 @@ Examples:
     annotations_parser.add_argument(
         "--cell-padding", type=int, default=0,
         help="Padding around individual cell crops"
-    )
-    
-    # Convert masks command
-    convert_parser = subparsers.add_parser(
-        "convert-masks", help="Convert masks to GeoJSON annotations"
-    )
-    convert_parser.add_argument(
-        "--input-dir", type=str, required=True,
-        help="Directory containing processed patches with masks"
-    )
-    convert_parser.add_argument(
-        "--classification-name", type=str, default="CellSAM Mask",
-        help="Name for the classification in GeoJSON"
-    )
-    
-    # Process GeoJSON command
-    geojson_parser = subparsers.add_parser(
-        "process-geojson", help="Process GeoJSON files to extract instances"
-    )
-    geojson_parser.add_argument(
-        "--geojson", type=str, required=True,
-        help="Path to GeoJSON file"
-    )
-    geojson_parser.add_argument(
-        "--image", type=str, default=None,
-        help="Path to original image (optional)"
-    )
-    geojson_parser.add_argument(
-        "--save-crops", action="store_true",
-        help="Save cropped images of instances"
-    )
-    geojson_parser.add_argument(
-        "--save-masks", action="store_true",
-        help="Save binary masks of instances"
-    )
-    geojson_parser.add_argument(
-        "--filter-classes", nargs="+", default=None,
-        help="Filter to specific class names"
     )
     
     return parser
@@ -274,73 +235,6 @@ def extract_annotations_command(args, config: DataProcessingConfig) -> None:
     
     logger.info(f"Successfully processed {processed_count} annotation sets")
 
-
-def convert_masks_command(args, config: DataProcessingConfig) -> None:
-    """Execute mask conversion command."""
-    logger.info("Starting mask conversion")
-    
-    converter = MaskToAnnotationConverter(config)
-    processed_count = 0
-    
-    # Find all directories with masks
-    for item in os.listdir(args.input_dir):
-        item_path = os.path.join(args.input_dir, item)
-        
-        if not os.path.isdir(item_path):
-            continue
-        
-        # Check if directory contains masks
-        masks_dir = os.path.join(item_path, "masks/data")
-        if not os.path.exists(masks_dir):
-            continue
-        
-        logger.info(f"Converting masks in {item}")
-        
-        try:
-            converter.convert_masks_to_geojson(
-                item_path, item, args.classification_name
-            )
-            processed_count += 1
-            
-        except Exception as e:
-            logger.error(f"Error converting masks in {item}: {e}")
-            continue
-    
-    logger.info(f"Successfully converted masks in {processed_count} directories")
-
-
-def process_geojson_command(args, config: DataProcessingConfig) -> None:
-    """Execute GeoJSON processing command."""
-    logger.info("Starting GeoJSON processing")
-    
-    processor = GeoJSONProcessor(config)
-    
-    # Load GeoJSON
-    features = processor.load_geojson(args.geojson)
-    
-    # Filter by classes if specified
-    if args.filter_classes:
-        features = processor.filter_features_by_class(features, args.filter_classes)
-    
-    # Load image if provided
-    image = None
-    if args.image:
-        import tifffile
-        image = tifffile.imread(args.image)
-        logger.info(f"Loaded image: {image.shape}")
-    
-    # Extract instances
-    df = processor.extract_instances(
-        features, image, args.output_dir,
-        save_crop=args.save_crops,
-        save_mask=args.save_masks
-    )
-    
-    # Print statistics
-    stats = processor.get_feature_statistics(features)
-    logger.info(f"Processing statistics: {stats}")
-
-
 def load_file_mappings(
     svs_dir: str, 
     geojson_dir: str, 
@@ -387,17 +281,33 @@ def load_file_mappings(
 
 def main():
     """Main entry point."""
+    partial_parser = argparse.ArgumentParser(add_help=False)
+    partial_parser.add_argument("--config", type=str, default=None)
+    partial_args, _ = partial_parser.parse_known_args()
+
+    config = DataProcessingConfig()
+    if partial_args.config:
+        config.load_from_file(partial_args.config)
+        config_dict = config.to_dict()
+    else:
+        config_dict = {}
+
     parser = setup_argparser()
     args = parser.parse_args()
-    
-    # Setup logging
-    setup_logging(args.log_level)
-    
-    # Load configuration
-    config = DataProcessingConfig()
-    if args.config:
-        config.load_from_file(args.config)
-    
+
+    # Convert args Namespace → dict
+    args_dict = vars(args)
+
+    # Config completely overrides unless CLI explicitly passed something
+    for k, v in config_dict.items():
+        cli_value = args_dict.get(k)
+        # If CLI explicitly passed, keep it. Otherwise use config
+        # `None`, `False` for store_true means not explicitly set
+        if cli_value in [None, False] and v is not None:
+            args_dict[k] = v
+
+    args = argparse.Namespace(**args_dict)
+
     # Create output directory
     os.makedirs(args.output_dir, exist_ok=True)
     
@@ -407,10 +317,6 @@ def main():
             extract_patches_command(args, config)
         elif args.command == "extract-annotations":
             extract_annotations_command(args, config)
-        elif args.command == "convert-masks":
-            convert_masks_command(args, config)
-        elif args.command == "process-geojson":
-            process_geojson_command(args, config)
         else:
             parser.print_help()
             sys.exit(1)

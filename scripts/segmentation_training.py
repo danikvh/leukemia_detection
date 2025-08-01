@@ -17,7 +17,8 @@ from segmentation.training.core.multistage_trainer import MultiStageTrainer
 from segmentation.utils.model_utils import load_cellsam_model
 
 
-def run_experiment(stage1_config_path: str,
+def run_experiment(args,
+                  stage1_config_path: str,
                   stage2_config_path: str,
                   dataset_config_path: str,
                   **overrides):
@@ -76,7 +77,7 @@ def run_experiment(stage1_config_path: str,
         raise ValueError(f"Unknown training strategy: {stage2_config.training_strategy}")
 
     # Load model
-    cellsam, device = load_cellsam_model()
+    cellsam, device = load_cellsam_model(args.model_path)
 
     # Create datasets
     dataset = DatasetFactory().create_dataset(
@@ -91,7 +92,8 @@ def run_experiment(stage1_config_path: str,
     trainer = MultiStageTrainer(cellsam, stage1_config, stage2_config, device, output_path)
 
     # Run
-    strat.execute_training(trainer, splits)
+    if not args.only_eval:
+        strat.execute_training(trainer, splits)
 
     # Metrics evaluation during infernce
     evaluation_results = trainer.finalize_with_evaluation(
@@ -116,6 +118,8 @@ def main():
     parser.add_argument("--mask_path", help="Path to masks")
     parser.add_argument("--output_dir", help="Experiment output dir")
     parser.add_argument("--output_name", help="Experiment output name")
+    parser.add_argument("--only_eval", action="store_true", help="Perform evaluation of a model")
+    parser.add_argument("--model_path", default=None, help="Experiment output name")
     parser.add_argument("--learning_rate", type=float, help="Override learning rate")
     parser.add_argument("--batch_size", type=int, help="Override batch size")
     parser.add_argument("--focal_loss_weight", type=float, help="Override focal loss weight")
@@ -136,6 +140,7 @@ def main():
     
     # Run experiment
     results = run_experiment(
+        args,
         stage1_config_path=args.stage1_config,
         stage2_config_path=args.stage2_config,
         dataset_config_path=args.dataset_config,

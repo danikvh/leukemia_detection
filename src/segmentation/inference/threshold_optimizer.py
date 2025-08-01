@@ -87,7 +87,7 @@ class MetricEvaluator:
         # Check cache first
         if threshold_rounded in self.evaluation_cache:
             cached_result = self.evaluation_cache[threshold_rounded]
-            score = self._extract_score(cached_result['metrics'], metric_name)
+            score = cached_result['metrics'][metric_name]
             return ThresholdResult(
                 threshold=threshold_rounded,
                 score=score,
@@ -114,7 +114,7 @@ class MetricEvaluator:
                 'step_size': step_size
             }
 
-            score = self._extract_score(results["batch_metrics"], metric_name)
+            score = results[metric_name]
             
             return ThresholdResult(
                 threshold=threshold_rounded,
@@ -135,15 +135,6 @@ class MetricEvaluator:
         finally:
             # Restore original threshold
             self.inference_engine.config.bbox_threshold = original_threshold
-    
-    def _extract_score(self, metrics: Dict[str, Any], metric_name: str) -> float:
-        """Extract the relevant score from metrics dictionary."""
-        if metric_name in self.METRIC_FUNCTIONS:
-            extractor = self.METRIC_FUNCTIONS[metric_name]
-            result = extractor(metrics)
-            return result if isinstance(result, (int, float)) else result[0]
-        else:
-            raise ValueError(f"Unknown metric: {metric_name}")
 
 
 class AdaptiveThresholdSearcher:
@@ -255,8 +246,8 @@ class AdaptiveThresholdSearcher:
             result = self.evaluator.evaluate_threshold(new_threshold, metric_name, step)
             self.search_history.append(result)
             
-            # Check if this is better (handle special case for recall_precision)
-            if self._is_better_result(result, current_best, metric_name):
+            # Check if this is better
+            if self._is_better_result(result, current_best):
                 logger.info(f"{arrow} Moving {direction_name}: {new_threshold:.6f} "
                            f"improves {metric_name.upper()} to {result.score:.6f}")
                 current_best = result
@@ -268,22 +259,10 @@ class AdaptiveThresholdSearcher:
     def _is_better_result(
         self, 
         new_result: ThresholdResult, 
-        current_best: ThresholdResult, 
-        metric_name: str
+        current_best: ThresholdResult
     ) -> bool:
         """Determine if new result is better than current best."""
-        if metric_name == 'recall_precision':
-            # Special handling for recall-precision optimization
-            new_recall = new_result.metrics.get('recall', 0)
-            current_recall = current_best.metrics.get('recall', 0)
-            new_precision = new_result.metrics.get('precision', 0)
-            current_precision = current_best.metrics.get('precision', 0)
-            
-            # Prioritize recall, use precision as tiebreaker
-            return (new_recall > current_recall or 
-                   (new_recall == current_recall and new_precision > current_precision))
-        else:
-            return new_result.score > current_best.score
+        return new_result.score > current_best.score
 
 
 class ThresholdOptimizer:

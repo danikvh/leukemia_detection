@@ -22,7 +22,7 @@ def load_cellsam_model(model_path=None, preeval=False, device=None):
         return model.to(device), device
 
     if os.path.exists(model_path):
-        state_dict = torch.load(model_path, map_location=device)
+        state_dict = torch.load(model_path, map_location=device)["model_state_dict"]
         model.load_state_dict(state_dict)
         print(f"Model loaded from {model_path}")
     else:

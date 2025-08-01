@@ -1,0 +1,47 @@
+# Binary Classification Configuration
+
+# Classification mode
+classification_mode: "binary"
+
+# Data paths
+data_dir: "data/classified_cells"
+labels_csv: "data/classified_cells/binary_labels.csv"
+
+# Image preprocessing
+image_size: 96
+normalize_mean: [0.485, 0.456, 0.406]
+normalize_std: [0.229, 0.224, 0.225]
+
+# Training parameters
+batch_size: 32
+epochs: 50
+learning_rate: 0.0001
+optimizer: "AdamW"
+loss_function: "auto"  # Will be set to BCEWithLogitsLoss automatically
+weight_decay: 0.00001
+
+# Class imbalance handling
+use_class_weights: true
+
+# Dataloader parameters
+num_workers: 4
+pin_memory: true
+
+# Model parameters
+model_name: "resnet18"
+pretrained: true
+
+# Early Stopping
+patience: 10
+early_stopping_metric: "val_f1"
+
+# Data splits
+train_split: 0.8
+val_split: 0.1
+test_split: 0.1
+random_seed: 42
+
+# Inference parameters
+confidence_threshold_high: 0.9
+confidence_threshold_low: 0.3
+uncertainty_threshold: 0.1

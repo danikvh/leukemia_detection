@@ -286,6 +286,7 @@ class InferenceEngine:
         # Containers for batch metrics
         gt_masks = []
         pred_masks = []
+        scores_list = []
         results = []
         single_evaluations = []
         
@@ -312,66 +313,50 @@ class InferenceEngine:
                 visualizer = ImageVisualizer()
                 visualizer.display_image_with_mask(image, gt_mask, torch.from_numpy(result.mask))
             
-            # Evaluate single image using the new evaluator system
-            single_result = self.metrics_calculator.evaluator.evaluate_single(
-                result.mask, 
-                gt_mask,
-                scores=result.scores,
-                image_id=i
-            )
-            single_evaluations.append(single_result)
-            
             # Store for batch processing
             gt_masks.append(gt_mask.cpu().numpy() if isinstance(gt_mask, torch.Tensor) else gt_mask)
             pred_masks.append(result.mask)
+            scores_list.append(result.scores)
             results.append(result)
             
             logger.info(f"Processed {i+1}/{dataset_size}: {filename}")
         
         # Calculate batch metrics using the new system
-        gt_batch = np.stack(gt_masks, axis=0)
-        pred_batch = np.stack(pred_masks, axis=0)
-        
-        # Get aggregated metrics from batch evaluation
-        batch_metrics, detailed_metrics_df = self.metrics_calculator.calculate_object_metrics(
-            gt_batch, pred_batch
+        batch_results = self.metrics_calculator.evaluator.evaluate_batch(
+            pred_masks, 
+            gt_masks, 
+            scores_list=scores_list
         )
         
-        # Also get individual evaluations aggregated
-        individual_aggregated = {}
-        if single_evaluations:
-            # Aggregate individual results
-            for method in single_evaluations[0].keys():
-                method_results = [eval_result[method] for eval_result in single_evaluations if method in eval_result]
-                if method_results and method_results[0]:  # Check if results exist and are not empty
-                    individual_aggregated[method] = {}
-                    metric_names = method_results[0].keys()
-                    for metric in metric_names:
-                        values = [r.get(metric, 0.0) for r in method_results if r]
-                        if values:
-                            individual_aggregated[method][metric] = np.mean(values)
-                            individual_aggregated[method][f"{metric}_std"] = np.std(values)
+        # Extract summary metrics (matches original output format)
+        summary_metrics = self.metrics_calculator.evaluator.get_summary_metrics(batch_results)
         
-        # Extract summary metrics
-        summary_metrics = self.metrics_calculator.evaluator.get_summary_metrics(batch_metrics)
-        
-        # Combine all results
         final_results = {
-            # Primary metrics from summary
-            **summary_metrics,
-            # Detailed batch metrics
-            'batch_metrics': batch_metrics,
-            # Individual evaluations aggregated
-            'individual_metrics': individual_aggregated,
-            # Keep detailed DataFrame if available
-            'detailed_metrics_df': detailed_metrics_df,
-            # Segmentation results
+            # Primary metrics (matches original return values)
+            'precision': summary_metrics.get('precision', 0.0),
+            'recall': summary_metrics.get('recall', 0.0),
+            'f1': summary_metrics.get('f1', 0.0),  # This is the aggregated F1, not averaged
+            'dice': summary_metrics.get('dice', 0.0),  # Average per-image pixel Dice
+            'jaccard': summary_metrics.get('jaccard', 0.0),
+            'AP': summary_metrics.get('AP', 0.0),
+            'AP50': summary_metrics.get('AP50', 0.0),
+            'AP75': summary_metrics.get('AP75', 0.0),
+            
+            # Additional metrics for compatibility
+            'batch_metrics': batch_results,
+            'summary_metrics': summary_metrics,
             'segmentation_results': results,
-            # Configuration
             'config': self.config.__dict__,
-            # Individual evaluations for detailed analysis
-            'individual_evaluations': single_evaluations
+            
+            # Statistics (matches original)
+            'true_positives': summary_metrics.get('true_positives', 0),
+            'false_positives': summary_metrics.get('false_positives', 0),
+            'false_negatives': summary_metrics.get('false_negatives', 0),
         }
+        
+        # Add detailed DataFrame if available from DeepCell
+        if 'deepcell' in batch_results and 'object_metrics_df' in batch_results['deepcell']:
+            final_results['object_metrics_df'] = batch_results['deepcell']['object_metrics_df']
         
         self._log_final_results(final_results)
         return final_results
@@ -381,25 +366,15 @@ class InferenceEngine:
         logger.info("\n" + "="*50)
         logger.info("FINAL SEGMENTATION RESULTS")
         logger.info("="*50)
-        logger.info(f"Precision: {results['batch_metrics'].get('precision', 0.0):.4f}")
-        logger.info(f"Recall: {results['batch_metrics'].get('recall', 0.0):.4f}")
-        logger.info(f"F1-Score: {results['batch_metrics'].get('f1', 0.0):.4f}")
-        logger.info(f"Dice Score: {results['batch_metrics'].get('dice', 0.0):.4f}")
-        logger.info(f"Jaccard Score: {results['batch_metrics'].get('jaccard', 0.0):.4f}")
-        logger.info(f"AP: {results['batch_metrics'].get('AP', 0.0):.4f}")
-        logger.info(f"AP50: {results['batch_metrics'].get('AP50', 0.0):.4f}")
-        logger.info(f"AP75: {results['batch_metrics'].get('AP75', 0.0):.4f}")
+        logger.info(f"Precision: {results.get('precision', 0.0):.4f}")
+        logger.info(f"Recall: {results.get('recall', 0.0):.4f}")
+        logger.info(f"F1-Score: {results.get('f1', 0.0):.4f}")
+        logger.info(f"Dice Score: {results.get('dice', 0.0):.4f}")
+        logger.info(f"Jaccard Score: {results.get('jaccard', 0.0):.4f}")
+        logger.info(f"AP: {results.get('AP', 0.0):.4f}")
+        logger.info(f"AP50: {results.get('AP50', 0.0):.4f}")
+        logger.info(f"AP75: {results.get('AP75', 0.0):.4f}")
         logger.info("="*50)
-        
-        # Print detailed results by method if available
-        if 'individual_metrics' in results:
-            logger.info("\nDetailed Results by Method:")
-            logger.info("-" * 30)
-            for method, metrics in results['individual_metrics'].items():
-                logger.info(f"\n{method.upper()}:")
-                for metric, value in metrics.items():
-                    if isinstance(value, (int, float)):
-                        logger.info(f"  {metric}: {value:.4f}")
 
 
 def create_inference_engine(

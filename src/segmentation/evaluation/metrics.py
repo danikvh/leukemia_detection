@@ -8,21 +8,15 @@ import torch
 from typing import Dict, List, Optional, Tuple, Union
 from abc import ABC, abstractmethod
 from scipy.optimize import linear_sum_assignment
+from scipy.stats import hmean
+
 
 # Third-party evaluation libraries
-try:
-    from deepcell_toolbox.metrics import ObjectMetrics
-    DEEPCELL_AVAILABLE = True
-except ImportError:
-    DEEPCELL_AVAILABLE = False
-
-try:
-    from pycocotools import mask
-    from pycocotools.coco import COCO
-    from pycocotools.cocoeval import COCOeval
-    COCO_AVAILABLE = True
-except ImportError:
-    COCO_AVAILABLE = False
+from deepcell.metrics import Metrics
+from deepcell_toolbox.metrics import ObjectMetrics
+from pycocotools import mask
+from pycocotools.coco import COCO
+from pycocotools.cocoeval import COCOeval
 
 
 class BaseEvaluator(ABC):
@@ -33,6 +27,11 @@ class BaseEvaluator(ABC):
         """Evaluate predicted vs ground truth masks."""
         pass
     
+    @abstractmethod
+    def evaluate_batch(self, pred_masks: List[np.ndarray], gt_masks: List[np.ndarray], **kwargs) -> Dict[str, float]:
+        """Evaluate batch of predicted vs ground truth masks."""
+        pass
+
     def _to_numpy(self, mask: Union[np.ndarray, torch.Tensor]) -> np.ndarray:
         """Convert tensor to numpy array if needed."""
         return mask.cpu().numpy() if isinstance(mask, torch.Tensor) else mask
@@ -117,44 +116,7 @@ class InstanceMetrics(BaseEvaluator):
             "false_positives": fp,
             "false_negatives": fn
         }
-    
-    def compute_ap_50(self, pred_mask: np.ndarray, gt_mask: np.ndarray) -> float:
-        """Compute AP50 (Average Precision at IoU=0.5) for instance segmentation."""
-        pred_mask = self._to_numpy(pred_mask)
-        gt_mask = self._to_numpy(gt_mask)
-        
-        pred_ids = np.unique(pred_mask)[pred_mask != 0]
-        gt_ids = np.unique(gt_mask)[gt_mask != 0]
-        
-        if len(gt_ids) == 0:
-            return 1.0 if len(pred_ids) == 0 else 0.0
-        
-        matched_gt = set()
-        tp = 0
-        
-        for pid in pred_ids:
-            pred_bin = (pred_mask == pid)
-            best_iou = 0
-            best_gid = None
-            
-            for gid in gt_ids:
-                if gid in matched_gt:
-                    continue
-                gt_bin = (gt_mask == gid)
-                intersection = np.logical_and(pred_bin, gt_bin).sum()
-                union = np.logical_or(pred_bin, gt_bin).sum()
-                iou = intersection / (union + 1e-8)
-                if iou > best_iou:
-                    best_iou = iou
-                    best_gid = gid
-            
-            if best_iou >= self.iou_threshold:
-                tp += 1
-                matched_gt.add(best_gid)
-        
-        fp = len(pred_ids) - tp
-        precision = tp / (tp + fp + 1e-8)
-        return precision
+
 
 
 class DeepCellEvaluator(BaseEvaluator):
@@ -163,9 +125,7 @@ class DeepCellEvaluator(BaseEvaluator):
     Provides comprehensive object-level metrics for cell segmentation.
     """
     
-    def __init__(self, iou_threshold: float = 0.5):
-        if not DEEPCELL_AVAILABLE:
-            raise ImportError("deepcell_toolbox is required for DeepCellEvaluator")
+    def __init__(self, iou_threshold: float = 0.6):
         self.iou_threshold = iou_threshold
     
     def evaluate(self, pred_mask: np.ndarray, gt_mask: np.ndarray, **kwargs) -> Dict[str, float]:
@@ -197,6 +157,56 @@ class DeepCellEvaluator(BaseEvaluator):
             print(f"DeepCell evaluation failed: {e}")
             return {"precision": 0.0, "recall": 0.0, "f1": 0.0, "jaccard": 0.0, "dice": 0.0}
 
+    def evaluate_batch(self, pred_masks: List[np.ndarray], gt_masks: List[np.ndarray], **kwargs) -> Dict[str, float]:
+        """
+        Batch evaluation using DeepCell's proper batch processing.
+        This replicates the original inference.py methodology exactly.
+        """
+        if len(pred_masks) != len(gt_masks):
+            raise ValueError("Number of predictions and ground truths must match")
+        
+        try:
+            # Convert to numpy arrays and stack (original methodology)
+            gt_batch = np.stack(gt_masks, axis=0)
+            pred_batch = np.stack(pred_masks, axis=0)
+            
+            # Use DeepCell's batch processing (matches original)
+            
+            print("Calculating object statistics using DeepCell batch processing...")
+            metrics = Metrics(model_name="custom", cutoff1=0.6, cutoff2=0.1) # cutoff1: iouthreshold, cutoff2: cf2threshold
+            object_metrics_df = metrics.calc_object_stats(gt_batch, pred_batch, progbar=True)
+            
+            # Extract metrics using original methodology
+            avg_dice = object_metrics_df['dice'].mean()
+            avg_jaccard = object_metrics_df['jaccard'].mean()
+            
+            # Aggregate counts (original methodology)
+            total_tp = object_metrics_df['correct_detections'].sum()
+            total_n_true = object_metrics_df['n_true'].sum()
+            total_n_pred = object_metrics_df['n_pred'].sum()
+            total_fp = total_n_pred - total_tp
+            total_fn = total_n_true - total_tp
+            
+            precision = total_tp / (total_tp + total_fp) if (total_tp + total_fp) > 0 else 0
+            recall = total_tp / (total_tp + total_fn) if (total_tp + total_fn) > 0 else 0
+            f1 = hmean([precision, recall]) if (precision + recall) > 0 else 0
+            
+            return {
+                "precision": precision,
+                "recall": recall,
+                "f1": f1,
+                "jaccard": avg_jaccard,
+                "dice": avg_dice,
+                "true_positives": int(total_tp),
+                "false_positives": int(total_fp),
+                "false_negatives": int(total_fn),
+                "object_metrics_df": object_metrics_df  # Return for compatibility
+            }
+            
+        except Exception as e:
+            print(f"DeepCell batch evaluation failed: {e}")
+            return {"precision": 0.0, "recall": 0.0, "f1": 0.0, "jaccard": 0.0, "dice": 0.0}
+
 
 class COCOEvaluator(BaseEvaluator):
     """
@@ -205,10 +215,8 @@ class COCOEvaluator(BaseEvaluator):
     """
     
     def __init__(self, max_detections: List[int] = None):
-        if not COCO_AVAILABLE:
-            raise ImportError("pycocotools is required for COCOEvaluator")
         self.max_detections = max_detections or [10, 100, 10000]  # Higher for cellular images
-        self._global_ann_id = 1
+        self._global_ann_id = 0
     
     def _prepare_coco_annotations(self, 
                                 gt_mask: np.ndarray, 
@@ -220,11 +228,18 @@ class COCOEvaluator(BaseEvaluator):
         gt_annotations = []
         pred_annotations = []
         
-        # Ground truth annotations
-        gt_instance_ids = np.unique(gt_mask)[1:]  # Remove background
+        # Obtain all instance ids
+        gt_instance_ids = np.unique(gt_mask)
+        pred_instance_ids = np.unique(pred_mask)
+        # Remove background
+        gt_instance_ids = gt_instance_ids[gt_instance_ids != 0]
+        pred_instance_ids = pred_instance_ids[pred_instance_ids != 0]
+
         for inst_id in gt_instance_ids:
+            # Mask of the particular instance
             binary_mask = (gt_mask == inst_id).astype(np.uint8)
             rle = mask.encode(np.asfortranarray(binary_mask))
+            # COCOeval requires string-encoded counts
             rle['counts'] = rle['counts'].decode('utf-8')
             
             area = mask.area(rle)
@@ -244,9 +259,7 @@ class COCOEvaluator(BaseEvaluator):
             })
             self._global_ann_id += 1
         
-        # Prediction annotations
-        pred_instance_ids = np.unique(pred_mask)[1:]  # Remove background
-        for i, inst_id in enumerate(pred_instance_ids):
+        for inst_id in pred_instance_ids:
             binary_mask = (pred_mask == inst_id).astype(np.uint8)
             rle = mask.encode(np.asfortranarray(binary_mask))
             
@@ -255,7 +268,13 @@ class COCOEvaluator(BaseEvaluator):
                 area = area[0]
             
             bbox = mask.toBbox(rle).tolist()
-            score = scores[i] if scores and i < len(scores) else 1.0
+            if scores is None:
+                score = 1.0
+            else:
+                # Obtain score for each prediction
+                score = scores[0]
+                scores = scores[1:]
+
             
             pred_annotations.append({
                 'id': self._global_ann_id,
@@ -296,46 +315,68 @@ class COCOEvaluator(BaseEvaluator):
         
         return self.evaluate_batch([gt_anns], [pred_anns], images_info, categories)
     
-    def evaluate_batch(self, 
-                      gt_annotations_list: List[List[Dict]], 
-                      pred_annotations_list: List[List[Dict]],
-                      images_info: List[Dict],
-                      categories: List[Dict]) -> Dict[str, float]:
+    def evaluate_batch(self, pred_masks: List[np.ndarray], gt_masks: List[np.ndarray], 
+                      scores_list: List[np.ndarray] = None, **kwargs) -> Dict[str, float]:
         """
         Batch evaluation using COCO metrics.
-        
-        Args:
-            gt_annotations_list: List of ground truth annotations per image
-            pred_annotations_list: List of prediction annotations per image
-            images_info: Image metadata
-            categories: Category definitions
-            
-        Returns:
-            Dictionary containing comprehensive AP metrics
+        This replicates the original prepare_coco_format + evaluate_coco methodology.
         """
-        # Flatten annotations
-        all_gt_anns = [ann for anns in gt_annotations_list for ann in anns]
-        all_pred_anns = [ann for anns in pred_annotations_list for ann in anns]
+        if len(pred_masks) != len(gt_masks):
+            raise ValueError("Number of predictions and ground truths must match")
         
-        if not all_gt_anns and not all_pred_anns:
+        # Reset counter
+        self._global_ann_id = 0
+        
+        # Accumulate all annotations (original methodology)
+        all_gt_annotations = []
+        all_pred_annotations = []
+        images_info = []
+        
+        for i, (pred_mask, gt_mask) in enumerate(zip(pred_masks, gt_masks)):
+            pred_mask = self._to_numpy(pred_mask)
+            gt_mask = self._to_numpy(gt_mask)
+            
+            # Image info
+            images_info.append({
+                "id": i,
+                "width": gt_mask.shape[1],
+                "height": gt_mask.shape[0],
+                "file_name": f"image_{i}.png",
+            })
+            
+            # Get scores for this image
+            scores = scores_list[i] if scores_list and i < len(scores_list) else None
+            
+            # Convert to COCO format (original methodology)
+            gt_ann, pred_ann = self._prepare_coco_annotations(gt_mask, pred_mask, i, scores)
+            all_gt_annotations.extend(gt_ann)
+            all_pred_annotations.extend(pred_ann)
+        
+        # Evaluate using COCO (original methodology)
+        categories = [{"id": 1, "name": "cell"}]
+        return self._evaluate_coco_batch(all_gt_annotations, all_pred_annotations, images_info, categories)
+    
+    def _evaluate_coco_batch(self, gt_annotations: List[Dict], pred_annotations: List[Dict],
+                           images_info: List[Dict], categories: List[Dict]) -> Dict[str, float]:
+        """
+        Internal method that replicates the original evaluate_coco function exactly.
+        """
+        if not gt_annotations and not pred_annotations:
             return self._empty_results()
         
         try:
-            # Create COCO ground truth
+            # Create COCO ground truth (original methodology)
             coco_gt = COCO()
             coco_gt.dataset['images'] = images_info
-            coco_gt.dataset['annotations'] = all_gt_anns
+            coco_gt.dataset['annotations'] = gt_annotations
             coco_gt.dataset['categories'] = categories
             coco_gt.createIndex()
             
-            # Load predictions
-            coco_dt = coco_gt.loadRes(all_pred_anns) if all_pred_anns else None
-            
-            if coco_dt is None:
-                return self._empty_results()
-            
+            # Load predictions (original methodology)
+            coco_dt = coco_gt.loadRes(pred_annotations)
             # Evaluate
             coco_eval = COCOeval(coco_gt, coco_dt, iouType='segm')
+            # Object density is much higher in cellular images than in natural images, modified the limit for the maximum number of detections from 100 to 10,000.
             coco_eval.params.maxDets = self.max_detections
             coco_eval.evaluate()
             coco_eval.accumulate()

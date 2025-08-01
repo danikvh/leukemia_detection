@@ -11,7 +11,7 @@ from classification.transforms import get_classification_transforms # Assuming r
 logger = logging.getLogger(__name__)
 
 class CellClassificationDataset(Dataset):
-    """Dataset for cell classification tasks (cancerous/non-cancerous)."""
+    """Dataset for cell classification tasks (binary: cancerous/non-cancerous, ternary: +false-positive)."""
 
     def __init__(
         self,
@@ -19,6 +19,7 @@ class CellClassificationDataset(Dataset):
         image_size: int,
         mean: Union[Tuple[float, ...], List[float]], # Use Union for flexibility
         std: Union[Tuple[float, ...], List[float]],
+        classification_mode: str = "binary",  # NEW: "binary" or "ternary"
         is_train: bool = True
     ):
         """
@@ -26,18 +27,36 @@ class CellClassificationDataset(Dataset):
             data_samples (List[Tuple[Path, int]]): A list of tuples, where each tuple
                                                    contains (image_path, label).
             image_size (int): The target size for images (e.g., 96 for 96x96).
-            mean (Tuple[float, float, float]): Mean for normalization.
-            std (Tuple[float, float, float]): Standard deviation for normalization.
+            mean (Union[Tuple[float, ...], List[float]]): Mean for normalization.
+            std (Union[Tuple[float, ...], List[float]]): Standard deviation for normalization.
+            classification_mode (str): Either "binary" or "ternary".
             is_train (bool): Whether this is a training dataset (applies augmentation).
         """
         if not data_samples:
             raise ValueError("data_samples cannot be empty.")
 
         self.data_samples = data_samples
+        self.classification_mode = classification_mode
+        
+        # Validate labels based on classification mode
+        labels = [sample[1] for sample in data_samples]
+        unique_labels = set(labels)
+        
+        if classification_mode == "binary":
+            expected_labels = {0, 1}
+            self.num_classes = 2
+        else:  # ternary
+            expected_labels = {0, 1, 2}
+            self.num_classes = 3
+            
+        if not unique_labels.issubset(expected_labels):
+            invalid_labels = unique_labels - expected_labels
+            raise ValueError(f"Invalid labels for {classification_mode} mode: {invalid_labels}. "
+                           f"Expected: {expected_labels}")
         
         # Ensure mean and std are tuples for consistency with torchvision.transforms.Normalize
         self.transform = get_classification_transforms(image_size, tuple(mean), tuple(std), is_train)
-        logger.info(f"Initialized CellClassificationDataset with {len(data_samples)} samples. "
+        logger.info(f"Initialized CellClassificationDataset with {len(data_samples)} samples in {classification_mode} mode. "
                     f"Augmentation {'ENABLED' if is_train else 'DISABLED'}.")
 
     def __len__(self) -> int:
@@ -81,7 +100,14 @@ class CellClassificationDataset(Dataset):
             
             # Apply transformations
             img_tensor = self.transform(img)
-            label_tensor = torch.tensor(label, dtype=torch.float32).unsqueeze(0) # For BCEWithLogitsLoss
+            
+            # Prepare label tensor based on classification mode
+            if self.classification_mode == "binary":
+                # For binary classification with BCEWithLogitsLoss
+                label_tensor = torch.tensor(label, dtype=torch.float32).unsqueeze(0)
+            else:
+                # For ternary classification with CrossEntropyLoss
+                label_tensor = torch.tensor(label, dtype=torch.long)
 
             return img_tensor, label_tensor, filename_stem
 
@@ -90,3 +116,26 @@ class CellClassificationDataset(Dataset):
             # Instead of re-raising, return a placeholder or handle gracefully in production
             # For this example, we re-raise to quickly catch issues.
             raise
+
+    def get_class_distribution(self) -> Dict[int, int]:
+        """
+        Returns the class distribution of the dataset.
+        
+        Returns:
+            Dict[int, int]: Dictionary mapping class labels to their counts.
+        """
+        labels = [sample[1] for sample in self.data_samples]
+        unique_labels, counts = np.unique(labels, return_counts=True)
+        return dict(zip(unique_labels, counts))
+
+    def get_class_names(self) -> List[str]:
+        """
+        Returns the class names based on classification mode.
+        
+        Returns:
+            List[str]: List of class names.
+        """
+        if self.classification_mode == "binary":
+            return ["non-cancerous", "cancerous"]
+        else:  # ternary
+            return ["non-cancerous", "cancerous", "false-positive"]

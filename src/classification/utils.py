@@ -2,6 +2,7 @@ import pandas as pd
 from pathlib import Path
 from typing import List, Tuple, Dict, Union, Optional
 from sklearn.model_selection import train_test_split
+from sklearn.utils.class_weight import compute_class_weight
 import logging
 import torch
 import numpy as np
@@ -10,16 +11,19 @@ from PIL import Image # For loading image formats like PNG
 
 logger = logging.getLogger(__name__)
 
-def load_classification_labels(csv_path: Path) -> Dict[str, int]:
+def load_classification_labels(csv_path: Path, classification_mode: str = "binary") -> Dict[str, int]:
     """
-    Loads cell image filenames and their corresponding binary labels from a CSV file.
-    Expected CSV format: 'filename', 'label' (label should be 'positive' or 'negative')
+    Loads cell image filenames and their corresponding labels from a CSV file.
+    
+    Binary mode: 'positive' or 'negative' -> 1 or 0
+    Ternary mode: 'positive', 'negative', or 'false-positive' -> 1, 0, or 2
     
     Args:
         csv_path (Path): Path to the CSV file.
+        classification_mode (str): Either "binary" or "ternary".
         
     Returns:
-        Dict[str, int]: A dictionary mapping filename (stem) to its binary label (1 for positive, 0 for negative).
+        Dict[str, int]: A dictionary mapping filename (stem) to its label.
     """
     if not csv_path.exists():
         raise FileNotFoundError(f"Labels CSV file not found: {csv_path}")
@@ -34,17 +38,49 @@ def load_classification_labels(csv_path: Path) -> Dict[str, int]:
 
         # Normalize label values
         df['label'] = df['label'].str.strip().str.lower()  # Handle casing and whitespace
-        label_mapping = {'positive': 1, 'negative': 0}
-        if not df['label'].isin(label_mapping.keys()).all():
-            raise ValueError(f"Labels must be 'positive' or 'negative'. Found: {df['label'].unique()}")
+        
+        if classification_mode == "binary":
+            label_mapping = {'positive': 1, 'negative': 0}
+            expected_labels = set(label_mapping.keys())
+        else:  # ternary
+            label_mapping = {'positive': 1, 'negative': 0, 'false-positive': 2}
+            expected_labels = set(label_mapping.keys())
+        
+        # Check for valid labels
+        actual_labels = set(df['label'].unique())
+        if not actual_labels.issubset(expected_labels):
+            invalid_labels = actual_labels - expected_labels
+            raise ValueError(
+                f"Invalid labels found for {classification_mode} mode: {invalid_labels}. "
+                f"Expected labels: {expected_labels}"
+            )
+        
+        # Map labels to integers
         df['label'] = df['label'].map(label_mapping)
+        
+        # Check for unmapped labels (shouldn't happen after validation, but safety check)
+        if df['label'].isnull().any():
+            unmapped = df[df['label'].isnull()]['label'].unique()
+            raise ValueError(f"Failed to map some labels: {unmapped}")
         
         # Ensure filename is just the stem (without extension) for easier matching
         df['filename'] = df['filename'].apply(lambda x: Path(x).stem)
         
         label_map = dict(zip(df['filename'], df['label']))
-        logger.info(f"Loaded {len(label_map)} classification labels from {csv_path}")
+        
+        # Log class distribution
+        class_counts = df['label'].value_counts().sort_index()
+        logger.info(f"Loaded {len(label_map)} classification labels from {csv_path} ({classification_mode} mode)")
+        for label_idx, count in class_counts.items():
+            if classification_mode == "binary":
+                label_name = "positive" if label_idx == 1 else "negative"
+            else:
+                label_names = {0: "negative", 1: "positive", 2: "false-positive"}
+                label_name = label_names[label_idx]
+            logger.info(f"  {label_name}: {count} samples")
+        
         return label_map
+        
     except Exception as e:
         logger.error(f"Error loading labels from {csv_path}: {e}")
         raise
@@ -171,6 +207,8 @@ def calculate_pos_weight(data_samples: List[Tuple[Path, int]]) -> float:
     Calculates the positive weight for BCEWithLogitsLoss to handle class imbalance.
     pos_weight = num_negative_samples / num_positive_samples
     
+    Note: This is only applicable for binary classification.
+    
     Args:
         data_samples (List[Tuple[Path, int]]): List of (image_path, label) tuples.
         
@@ -189,12 +227,48 @@ def calculate_pos_weight(data_samples: List[Tuple[Path, int]]) -> float:
     logger.info(f"Calculated pos_weight: {pos_weight:.2f} (Negative: {num_negative}, Positive: {num_positive})")
     return pos_weight
 
+def calculate_class_weights(data_samples: List[Tuple[Path, int]], num_classes: int) -> np.ndarray:
+    """
+    Calculates class weights for multi-class classification to handle class imbalance.
+    
+    Args:
+        data_samples (List[Tuple[Path, int]]): List of (image_path, label) tuples.
+        num_classes (int): Number of classes (e.g., 3 for ternary).
+        
+    Returns:
+        np.ndarray: Array of class weights.
+    """
+    labels = [sample[1] for sample in data_samples]
+    unique_labels = np.unique(labels)
+    
+    if len(unique_labels) != num_classes:
+        logger.warning(f"Expected {num_classes} classes but found {len(unique_labels)}: {unique_labels}")
+    
+    class_weights = compute_class_weight(
+        class_weight='balanced',
+        classes=unique_labels,
+        y=labels
+    )
+    
+    # Ensure we have weights for all classes (fill missing with 1.0)
+    full_weights = np.ones(num_classes)
+    for i, label in enumerate(unique_labels):
+        full_weights[label] = class_weights[i]
+    
+    logger.info(f"Calculated class weights: {full_weights}")
+    for i, weight in enumerate(full_weights):
+        count = sum(1 for label in labels if label == i)
+        logger.info(f"  Class {i}: weight={weight:.3f}, count={count}")
+    
+    return full_weights
+
 def visualize_cell(
     image_input: Union[Path, torch.Tensor], # Changed type to accept Path or Tensor
     true_label: Union[int, torch.Tensor],    # Changed type to accept int or Tensor
-    filename_stem: Optional[str] = None,     # NEW: Optional filename for title
+    filename_stem: Optional[str] = None,     # Optional filename for title
     predicted_label: Optional[str] = None,
-    probability: Optional[float] = None,
+    probability: Optional[Union[float, List[float]]] = None,  # Can be single prob or list of probs
+    classification_mode: str = "binary",     # NEW: Support for different modes
     figsize: Tuple[int, int] = (4, 4)
 ) -> None:
     """
@@ -204,12 +278,13 @@ def visualize_cell(
     Args:
         image_input (Union[Path, torch.Tensor]): Path to the cell image file OR a torch.Tensor
                                                  representing the image (C, H, W).
-        true_label (Union[int, torch.Tensor]): The ground truth label (0 or 1) OR a torch.Tensor
+        true_label (Union[int, torch.Tensor]): The ground truth label OR a torch.Tensor
                                                 containing the label.
         filename_stem (Optional[str]): Optional filename stem to display in the title if
                                        image_input is a tensor.
-        predicted_label (Optional[str]): The predicted label ('cancerous', 'non-cancerous', 'uncertain').
-        probability (Optional[float]): The predicted probability of being cancerous.
+        predicted_label (Optional[str]): The predicted label.
+        probability (Optional[Union[float, List[float]]]): The predicted probability(ies).
+        classification_mode (str): Either "binary" or "ternary".
         figsize (Tuple[int, int]): Figure size for the plot.
     """
     img_data = None # Will store numpy array for imshow
@@ -316,11 +391,23 @@ def visualize_cell(
         plt.imshow(img_data, interpolation=interpolation_style) # Use numpy array
         plt.axis('off')
 
-        true_label_str = "Cancerous" if true_label_val == 1 else "Non-Cancerous"
+        # Handle true label display based on classification mode
+        if classification_mode == "binary":
+            true_label_str = "Cancerous" if true_label_val == 1 else "Non-Cancerous"
+        else:  # ternary
+            label_names = {0: "Non-Cancerous", 1: "Cancerous", 2: "False-Positive"}
+            true_label_str = label_names.get(true_label_val, f"Unknown({true_label_val})")
+
         title_text = f"File: {filename_stem}\nTrue: {true_label_str}" # Include filename_stem
 
         if predicted_label is not None and probability is not None:
-            title_text += f"\nPred: {predicted_label} (Prob: {probability:.4f})"
+            if isinstance(probability, list):
+                # For ternary classification, show all probabilities
+                prob_str = ", ".join([f"{p:.3f}" for p in probability])
+                title_text += f"\nPred: {predicted_label}\nProbs: [{prob_str}]"
+            else:
+                # For binary classification, show single probability
+                title_text += f"\nPred: {predicted_label} (Prob: {probability:.4f})"
         elif predicted_label is not None:
             title_text += f"\nPred: {predicted_label}"
 
@@ -330,3 +417,57 @@ def visualize_cell(
 
     except Exception as e:
         logger.error(f"Error visualizing image ({filename_stem if filename_stem else 'unknown'}): {e}")
+
+def visualize_class_distribution(data_samples: List[Tuple[Path, int]], classification_mode: str = "binary", 
+                               title: str = "Class Distribution", figsize: Tuple[int, int] = (8, 6)) -> None:
+    """
+    Visualizes the distribution of classes in the dataset.
+    
+    Args:
+        data_samples (List[Tuple[Path, int]]): List of (image_path, label) tuples.
+        classification_mode (str): Either "binary" or "ternary".
+        title (str): Title for the plot.
+        figsize (Tuple[int, int]): Figure size for the plot.
+    """
+    labels = [sample[1] for sample in data_samples]
+    unique_labels, counts = np.unique(labels, return_counts=True)
+    
+    # Define class names based on mode
+    if classification_mode == "binary":
+        class_names = {0: "Non-Cancerous", 1: "Cancerous"}
+    else:  # ternary
+        class_names = {0: "Non-Cancerous", 1: "Cancerous", 2: "False-Positive"}
+    
+    # Create labels for plotting
+    plot_labels = [class_names.get(label, f"Class {label}") for label in unique_labels]
+    
+    plt.figure(figsize=figsize)
+    bars = plt.bar(plot_labels, counts, alpha=0.7, 
+                   color=['lightblue', 'lightcoral', 'lightgreen'][:len(unique_labels)])
+    
+    # Add count labels on bars
+    for bar, count in zip(bars, counts):
+        plt.text(bar.get_x() + bar.get_width()/2, bar.get_height() + max(counts)*0.01,
+                str(count), ha='center', va='bottom', fontweight='bold')
+    
+    plt.title(title, fontsize=14, fontweight='bold')
+    plt.xlabel('Class', fontsize=12)
+    plt.ylabel('Number of Samples', fontsize=12)
+    plt.grid(axis='y', alpha=0.3)
+    
+    # Add percentage annotations
+    total_samples = sum(counts)
+    for i, (label, count) in enumerate(zip(plot_labels, counts)):
+        percentage = (count / total_samples) * 100
+        plt.text(i, count/2, f'{percentage:.1f}%', ha='center', va='center', 
+                fontweight='bold', color='white' if count > max(counts)*0.3 else 'black')
+    
+    plt.tight_layout()
+    plt.show()
+    
+    # Log the distribution
+    logger.info(f"Class distribution ({classification_mode} mode):")
+    for label, count in zip(unique_labels, counts):
+        class_name = class_names.get(label, f"Class {label}")
+        percentage = (count / total_samples) * 100
+        logger.info(f"  {class_name}: {count} samples ({percentage:.1f}%)")

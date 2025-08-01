@@ -1,0 +1,10 @@
+# File paths
+output_dir: "../results/annotation_extraction"
+svs_dir: "../data/lafe/raw/Image"
+geojson_dir: "../data/lafe/annotations/iteration2"
+
+# Outputs
+show_results: false
+
+# Data processing parameters
+cell_padding: 0

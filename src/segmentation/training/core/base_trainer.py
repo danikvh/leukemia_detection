@@ -278,7 +278,7 @@ class BaseTrainer(ABC):
                 # No validation - save model periodically
                 if (epoch + 1) % 50 == 0:
                     self.checkpoint_manager.save_checkpoint(
-                        self.model, self.optimizer, epoch, train_losses['total_loss']
+                        self.model,  epoch, train_losses['total_loss'], self.optimizer
                     )
             
             # Step scheduler

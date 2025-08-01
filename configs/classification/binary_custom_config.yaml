@@ -1,0 +1,47 @@
+# Custom CNN Binary Configuration
+
+# Classification mode
+classification_mode: "binary"
+
+# Data paths
+data_dir: "data/classified_cells"
+labels_csv: "data/classified_cells/binary_labels.csv"
+
+# Image preprocessing
+image_size: 96
+normalize_mean: [0.5, 0.5, 0.5]  # Different normalization for custom CNN
+normalize_std: [0.5, 0.5, 0.5]
+
+# Training parameters
+batch_size: 64  # Larger batch for custom CNN
+epochs: 80      # More epochs for training from scratch
+learning_rate: 0.001  # Higher learning rate
+optimizer: "AdamW"
+loss_function: "BCEWithLogitsLoss"
+weight_decay: 0.0001
+
+# Class imbalance handling
+use_class_weights: true
+
+# Dataloader parameters
+num_workers: 4
+pin_memory: true
+
+# Model parameters
+model_name: "custom_cnn"
+pretrained: false  # Not applicable for custom CNN
+
+# Early Stopping
+patience: 20  # More patience for training from scratch
+early_stopping_metric: "val_loss"
+
+# Data splits
+train_split: 0.8
+val_split: 0.1
+test_split: 0.1
+random_seed: 42
+
+# Inference parameters
+confidence_threshold_high: 0.85
+confidence_threshold_low: 0.35
+uncertainty_threshold: 0.1

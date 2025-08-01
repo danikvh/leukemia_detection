@@ -7,6 +7,9 @@ import yaml
 class ClassificationConfig:
     """Configuration class for cell classification."""
 
+    # Classification mode
+    classification_mode: str = "binary"  # NEW: Options: "binary", "ternary"
+    
     # Data paths
     data_dir: str = "data/classified_cells" # Directory containing individual cell images (output from segmentation)
     labels_csv: str = "data/classified_cells/labels.csv" # Path to CSV with labels (e.g., filename, label)
@@ -21,7 +24,8 @@ class ClassificationConfig:
     epochs: int = 50
     learning_rate: float = 1e-4
     optimizer: str = "AdamW" # Options: "AdamW", "SGD"
-    loss_function: str = "BCEWithLogitsLoss" # Binary Cross-Entropy with Logits
+    # NEW: Modified to support both binary and multi-class
+    loss_function: str = "auto"  # Options: "auto", "BCEWithLogitsLoss", "CrossEntropyLoss"
     weight_decay: float = 1e-5
     
     # Class imbalance handling
@@ -35,7 +39,7 @@ class ClassificationConfig:
     model_name: str = "resnet18" # Options: "custom_cnn", "resnet18", "resnet34", "resnet50"
     pretrained: bool = True # Use ImageNet pretrained weights if using torchvision models
 
-    # Early Stopping # NEW
+    # Early Stopping
     patience: int = 10 # Number of epochs to wait for improvement before stopping
     early_stopping_metric: str = "val_loss" # Metric to monitor for early stopping ('val_loss', 'val_accuracy', 'val_f1', etc.)
 
@@ -45,9 +49,11 @@ class ClassificationConfig:
     test_split: float = 0.1
     random_seed: int = 42
 
-    # Inference parameters
-    confidence_threshold_high: float = 0.9 # Probability threshold for 'cancerous'
-    confidence_threshold_low: float = 0.3  # Probability threshold for 'non-cancerous'
+    # Inference parameters - updated for ternary support
+    confidence_threshold_high: float = 0.9 # Probability threshold for 'cancerous' (binary) or highest confidence (ternary)
+    confidence_threshold_low: float = 0.3  # Probability threshold for 'non-cancerous' (binary) or lowest confidence (ternary)
+    # NEW: Additional threshold for ternary classification uncertainty
+    uncertainty_threshold: float = 0.1  # If max probability - second_max probability < this, classify as uncertain
 
     def __post_init__(self):
         """Validate configuration after initialization."""
@@ -62,6 +68,35 @@ class ClassificationConfig:
         
         if not 0 <= self.confidence_threshold_low <= self.confidence_threshold_high <= 1:
             raise ValueError("Confidence thresholds must be between 0 and 1 and low <= high")
+            
+        if self.classification_mode not in ["binary", "ternary"]:
+            raise ValueError("Classification mode must be 'binary' or 'ternary'")
+            
+        # Auto-set loss function based on classification mode
+        if self.loss_function == "auto":
+            if self.classification_mode == "binary":
+                self.loss_function = "BCEWithLogitsLoss"
+            else:  # ternary
+                self.loss_function = "CrossEntropyLoss"
+        
+        # Validate loss function compatibility
+        if self.classification_mode == "binary" and self.loss_function == "CrossEntropyLoss":
+            raise ValueError("CrossEntropyLoss is not compatible with binary classification mode")
+        if self.classification_mode == "ternary" and self.loss_function == "BCEWithLogitsLoss":
+            raise ValueError("BCEWithLogitsLoss is not compatible with ternary classification mode")
+
+    @property
+    def num_classes(self) -> int:
+        """Returns the number of classes based on classification mode."""
+        return 1 if self.classification_mode == "binary" else 3
+
+    @property
+    def class_names(self) -> List[str]:
+        """Returns class names based on classification mode."""
+        if self.classification_mode == "binary":
+            return ["non-cancerous", "cancerous"]
+        else:
+            return ["non-cancerous", "cancerous", "false-positive"]
 
     @classmethod
     def from_yaml(cls, config_path: Union[str, Path]) -> 'ClassificationConfig':
@@ -88,11 +123,18 @@ class ClassificationConfig:
         with open(output_path, 'w') as f:
             yaml.dump(config_dict, f, default_flow_style=False, indent=2)
 
-def create_default_classification_config(output_dir: Union[str, Path] = "configs/classification/") -> None:
+def create_default_classification_config(output_dir: Union[str, Path] = "configs/classification/", mode: str = "binary") -> None:
     """Create a default example classification configuration file."""
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
     
-    config = ClassificationConfig()
-    config.to_yaml(output_path / "default_classification_config.yaml")
-    print(f"Created {output_path / 'default_classification_config.yaml'}")
+    config = ClassificationConfig(classification_mode=mode)
+    suffix = f"_{mode}" if mode != "binary" else ""
+    config.to_yaml(output_path / f"default_classification_config{suffix}.yaml")
+    print(f"Created {output_path / f'default_classification_config{suffix}.yaml'}")
+
+# Create both binary and ternary configs by default
+def create_both_configs(output_dir: Union[str, Path] = "configs/classification/") -> None:
+    """Create both binary and ternary default configuration files."""
+    create_default_classification_config(output_dir, "binary")
+    create_default_classification_config(output_dir, "ternary")

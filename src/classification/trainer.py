@@ -2,14 +2,15 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
-from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score, classification_report, confusion_matrix
 import numpy as np
 import logging
 from tqdm import tqdm
 from pathlib import Path
 import json
-from typing import Dict, Optional
+from typing import Dict, Optional, Union, List
 import matplotlib.pyplot as plt
+import seaborn as sns
 
 from classification.config import ClassificationConfig
 
@@ -19,6 +20,7 @@ logger = logging.getLogger(__name__)
 class ClassificationTrainer:
     """
     Trainer class for cell classification models.
+    Supports both binary and ternary classification modes.
     """
     def __init__(
         self,
@@ -26,7 +28,8 @@ class ClassificationTrainer:
         train_loader: DataLoader,
         val_loader: DataLoader,
         config: ClassificationConfig,
-        pos_weight: Optional[float] = None # For BCEWithLogitsLoss to handle imbalance
+        pos_weight: Optional[float] = None, # For BCEWithLogitsLoss to handle imbalance
+        class_weights: Optional[Union[torch.Tensor, np.ndarray]] = None  # For CrossEntropyLoss
     ):
         self.model = model
         self.train_loader = train_loader
@@ -51,6 +54,15 @@ class ClassificationTrainer:
             else:
                 self.criterion = nn.BCEWithLogitsLoss()
                 logger.info("Using BCEWithLogitsLoss without class weights.")
+        elif config.loss_function == "CrossEntropyLoss":
+            if config.use_class_weights and class_weights is not None:
+                if isinstance(class_weights, np.ndarray):
+                    class_weights = torch.tensor(class_weights, dtype=torch.float32)
+                self.criterion = nn.CrossEntropyLoss(weight=class_weights.to(self.device))
+                logger.info(f"Using CrossEntropyLoss with class weights: {class_weights}")
+            else:
+                self.criterion = nn.CrossEntropyLoss()
+                logger.info("Using CrossEntropyLoss without class weights.")
         else:
             raise ValueError(f"Unsupported loss function: {config.loss_function}")
             
@@ -62,22 +74,36 @@ class ClassificationTrainer:
         if self.early_stopping_metric == "val_loss":
             self.best_early_stopping_score = float('inf') # Lower is better
             self.is_better = lambda current, best: current < best
-        else: # For accuracy, precision, recall, f1, auc, undecided_percentage (higher is better for these)
+        else: # For accuracy, precision, recall, f1, etc. (higher is better)
             self.best_early_stopping_score = -float('inf') # Higher is better
             self.is_better = lambda current, best: current > best
         
         self.epochs_no_improve = 0 # Reset epochs no improve counter
 
-        self.metrics_history = {
-            'train_loss': [], 
-            'val_loss': [], 
-            'val_accuracy': [], 
-            'val_precision': [], 
-            'val_recall': [], 
-            'val_f1': [], 
-            'val_auc': [],
-            'val_undecided_percentage': []
-        }
+        # Initialize metrics history based on classification mode
+        if config.classification_mode == "binary":
+            self.metrics_history = {
+                'train_loss': [], 
+                'val_loss': [], 
+                'val_accuracy': [], 
+                'val_precision': [], 
+                'val_recall': [], 
+                'val_f1': [], 
+                'val_auc': [],
+                'val_undecided_percentage': []
+            }
+        else:  # ternary
+            self.metrics_history = {
+                'train_loss': [], 
+                'val_loss': [], 
+                'val_accuracy': [], 
+                'val_precision_macro': [],
+                'val_recall_macro': [],
+                'val_f1_macro': [],
+                'val_precision_weighted': [],
+                'val_recall_weighted': [],
+                'val_f1_weighted': []
+            }
         
     def _train_epoch(self) -> float:
         self.model.train()
@@ -96,11 +122,12 @@ class ClassificationTrainer:
     def _validate_epoch(self) -> Dict[str, float]:
         self.model.eval()
         total_loss = 0.0
-        all_preds_binary = [] 
+        all_preds = []
         all_labels = []
-        all_probs = [] 
+        all_probs = []
         
-        undecided_count = 0 
+        if self.config.classification_mode == "binary":
+            undecided_count = 0
 
         with torch.no_grad():
             for inputs, labels, _ in tqdm(self.val_loader, desc="Validation"):
@@ -110,29 +137,48 @@ class ClassificationTrainer:
                 loss = self.criterion(outputs, labels)
                 total_loss += loss.item()
 
-                probs = torch.sigmoid(outputs)
-                preds_binary = (probs > 0.5).long() 
+                if self.config.classification_mode == "binary":
+                    probs = torch.sigmoid(outputs)
+                    preds_binary = (probs > 0.5).long()
+                    
+                    all_preds.extend(preds_binary.cpu().numpy().flatten())
+                    all_labels.extend(labels.cpu().numpy().flatten())
+                    all_probs.extend(probs.cpu().numpy().flatten())
 
-                all_preds_binary.extend(preds_binary.cpu().numpy().flatten())
-                all_labels.extend(labels.cpu().numpy().flatten())
-                all_probs.extend(probs.cpu().numpy().flatten())
-
-                for prob in probs.cpu().numpy().flatten():
-                    if self.config.confidence_threshold_low < prob < self.config.confidence_threshold_high:
-                        undecided_count += 1
+                    # Count undecided samples for binary classification
+                    for prob in probs.cpu().numpy().flatten():
+                        if self.config.confidence_threshold_low < prob < self.config.confidence_threshold_high:
+                            undecided_count += 1
+                            
+                else:  # ternary
+                    probs = torch.softmax(outputs, dim=1)
+                    preds = torch.argmax(probs, dim=1)
+                    
+                    all_preds.extend(preds.cpu().numpy())
+                    all_labels.extend(labels.cpu().numpy())
+                    all_probs.extend(probs.cpu().numpy())
 
         avg_loss = total_loss / len(self.val_loader)
         
-        accuracy = accuracy_score(all_labels, all_preds_binary)
-        precision = precision_score(all_labels, all_preds_binary, zero_division=0)
+        # Calculate metrics based on classification mode
+        if self.config.classification_mode == "binary":
+            return self._calculate_binary_metrics(avg_loss, all_labels, all_preds, all_probs, undecided_count)
+        else:
+            return self._calculate_ternary_metrics(avg_loss, all_labels, all_preds, all_probs)
+
+    def _calculate_binary_metrics(self, avg_loss: float, all_labels: List, all_preds: List, 
+                                all_probs: List, undecided_count: int) -> Dict[str, float]:
+        """Calculate metrics for binary classification."""
+        accuracy = accuracy_score(all_labels, all_preds)
+        precision = precision_score(all_labels, all_preds, zero_division=0)
         
         if len(all_labels) == 0:
             recall = 0.0
             logger.warning("Recall not calculated: No true labels found in validation set.")
         else:
-            recall = recall_score(all_labels, all_preds_binary, zero_division=0)
+            recall = recall_score(all_labels, all_preds, zero_division=0)
 
-        f1 = f1_score(all_labels, all_preds_binary, zero_division=0)
+        f1 = f1_score(all_labels, all_preds, zero_division=0)
         
         auc = 0.0
         if len(np.unique(all_labels)) > 1:
@@ -143,15 +189,39 @@ class ClassificationTrainer:
         total_val_samples = len(all_labels)
         undecided_percentage = (undecided_count / total_val_samples) if total_val_samples > 0 else 0.0
 
-        # CORRECTED: Prefix keys with 'val_' to match self.metrics_history and config.early_stopping_metric
         return {
-            'val_loss': avg_loss, # Changed from 'loss'
-            'val_accuracy': accuracy, # Changed from 'accuracy'
-            'val_precision': precision, # Changed from 'precision'
-            'val_recall': recall, # Changed from 'recall'
-            'val_f1': f1, # Changed from 'f1_score'
-            'val_auc': auc, # Changed from 'auc'
+            'val_loss': avg_loss,
+            'val_accuracy': accuracy,
+            'val_precision': precision,
+            'val_recall': recall,
+            'val_f1': f1,
+            'val_auc': auc,
             'val_undecided_percentage': undecided_percentage
+        }
+
+    def _calculate_ternary_metrics(self, avg_loss: float, all_labels: List, all_preds: List, 
+                                 all_probs: List) -> Dict[str, float]:
+        """Calculate metrics for ternary classification."""
+        accuracy = accuracy_score(all_labels, all_preds)
+        
+        # Calculate macro and weighted averages
+        precision_macro = precision_score(all_labels, all_preds, average='macro', zero_division=0)
+        recall_macro = recall_score(all_labels, all_preds, average='macro', zero_division=0)
+        f1_macro = f1_score(all_labels, all_preds, average='macro', zero_division=0)
+        
+        precision_weighted = precision_score(all_labels, all_preds, average='weighted', zero_division=0)
+        recall_weighted = recall_score(all_labels, all_preds, average='weighted', zero_division=0)
+        f1_weighted = f1_score(all_labels, all_preds, average='weighted', zero_division=0)
+
+        return {
+            'val_loss': avg_loss,
+            'val_accuracy': accuracy,
+            'val_precision_macro': precision_macro,
+            'val_recall_macro': recall_macro,
+            'val_f1_macro': f1_macro,
+            'val_precision_weighted': precision_weighted,
+            'val_recall_weighted': recall_weighted,
+            'val_f1_weighted': f1_weighted
         }
 
     def train(self, output_dir: Path):
@@ -161,33 +231,41 @@ class ClassificationTrainer:
         output_dir.mkdir(parents=True, exist_ok=True)
         
         logger.info(f"Starting training for {self.config.epochs} epochs on {self.device}")
+        logger.info(f"Classification mode: {self.config.classification_mode}")
         logger.info(f"Early stopping monitor: {self.early_stopping_metric} with patience {self.patience}")
 
-        model_save_path = output_dir / "best_classification_model.pth"
+        model_save_path = output_dir / f"best_{self.config.classification_mode}_classification_model.pth"
         
         for epoch in range(1, self.config.epochs + 1):
             train_loss = self._train_epoch()
-            val_metrics = self._validate_epoch() # This now returns keys with 'val_' prefix
+            val_metrics = self._validate_epoch()
 
-            # These keys now correctly match the names returned by _validate_epoch
+            # Update metrics history
             self.metrics_history['train_loss'].append(train_loss)
-            self.metrics_history['val_loss'].append(val_metrics['val_loss'])
-            self.metrics_history['val_accuracy'].append(val_metrics['val_accuracy'])
-            self.metrics_history['val_precision'].append(val_metrics['val_precision'])
-            self.metrics_history['val_recall'].append(val_metrics['val_recall'])
-            self.metrics_history['val_f1'].append(val_metrics['val_f1'])
-            self.metrics_history['val_auc'].append(val_metrics['val_auc'])
-            self.metrics_history['val_undecided_percentage'].append(val_metrics['val_undecided_percentage'])
+            for key, value in val_metrics.items():
+                if key in self.metrics_history:
+                    self.metrics_history[key].append(value)
 
-            logger.info(
-                f"Epoch {epoch}/{self.config.epochs} - "
-                f"Train Loss: {train_loss:.4f}, "
-                f"Val Loss: {val_metrics['val_loss']:.4f}, " # Corrected key
-                f"Val Acc: {val_metrics['val_accuracy']:.4f}, " # Corrected key
-                f"Val F1: {val_metrics['val_f1']:.4f}, " # Corrected key
-                f"Val AUC: {val_metrics['val_auc']:.4f}, " # Corrected key
-                f"Val Undecided: {val_metrics['val_undecided_percentage']:.2%}" # Corrected key
-            )
+            # Log epoch results
+            if self.config.classification_mode == "binary":
+                logger.info(
+                    f"Epoch {epoch}/{self.config.epochs} - "
+                    f"Train Loss: {train_loss:.4f}, "
+                    f"Val Loss: {val_metrics['val_loss']:.4f}, "
+                    f"Val Acc: {val_metrics['val_accuracy']:.4f}, "
+                    f"Val F1: {val_metrics['val_f1']:.4f}, "
+                    f"Val AUC: {val_metrics['val_auc']:.4f}, "
+                    f"Val Undecided: {val_metrics['val_undecided_percentage']:.2%}"
+                )
+            else:  # ternary
+                logger.info(
+                    f"Epoch {epoch}/{self.config.epochs} - "
+                    f"Train Loss: {train_loss:.4f}, "
+                    f"Val Loss: {val_metrics['val_loss']:.4f}, "
+                    f"Val Acc: {val_metrics['val_accuracy']:.4f}, "
+                    f"Val F1 (macro): {val_metrics['val_f1_macro']:.4f}, "
+                    f"Val F1 (weighted): {val_metrics['val_f1_weighted']:.4f}"
+                )
 
             # Early stopping logic
             current_early_stopping_score = val_metrics[self.early_stopping_metric]
@@ -201,7 +279,8 @@ class ClassificationTrainer:
                 self.epochs_no_improve += 1
                 logger.info(f"No improvement for {self.early_stopping_metric}. Patience: {self.epochs_no_improve}/{self.patience}")
 
-            history_path = output_dir / "training_history.json"
+            # Save training history
+            history_path = output_dir / f"{self.config.classification_mode}_training_history.json"
             with open(history_path, 'w') as f:
                 json.dump(self.metrics_history, f, indent=4)
             
@@ -213,44 +292,14 @@ class ClassificationTrainer:
     
     def plot_metrics_history(self, save_path: Optional[Path] = None) -> None:
         """
-        Plots the training and validation loss, and validation metrics over epochs.
+        Plots the training and validation metrics over epochs.
         
         Args:
             save_path (Optional[Path]): If provided, saves the plot to this path.
         """
         epochs = range(1, len(self.metrics_history['train_loss']) + 1)
 
-        plt.style.use('seaborn-v0_8-darkgrid')
-        plt.figure(figsize=(15, 6))
-
-        # Plot Loss
-        plt.subplot(1, 2, 1)
-        plt.plot(epochs, self.metrics_history['train_loss'], label='Train Loss', marker='o', markersize=4)
-        plt.plot(epochs, self.metrics_history['val_loss'], label='Validation Loss', marker='o', markersize=4)
-        plt.title('Loss over Epochs', fontsize=14)
-        plt.xlabel('Epoch', fontsize=12)
-        plt.ylabel('Loss', fontsize=12)
-        plt.legend()
-        plt.grid(True)
-
-        # Plot Metrics
-        plt.subplot(1, 2, 2)
-        plt.plot(epochs, self.metrics_history['val_accuracy'], label='Val Accuracy', marker='o', markersize=4)
-        plt.plot(epochs, self.metrics_history['val_precision'], label='Val Precision', marker='o', markersize=4)
-        plt.plot(epochs, self.metrics_history['val_recall'], label='Val Recall', marker='o', markersize=4)
-        plt.plot(epochs, self.metrics_history['val_f1'], label='Val F1-Score', marker='o', markersize=4)
-        plt.plot(epochs, self.metrics_history['val_auc'], label='Val AUC', marker='o', markersize=4)
-        plt.plot(epochs, self.metrics_history['val_undecided_percentage'], label='Val Undecided %', marker='x', linestyle='--', markersize=4) 
-        
-        plt.title('Validation Metrics over Epochs', fontsize=14)
-        plt.xlabel('Epoch', fontsize=12)
-        plt.ylabel('Score / Percentage', fontsize=12) 
-        plt.ylim(0, 1.05) 
-        plt.legend()
-        plt.grid(True)
-
-        plt.tight_layout()
-        if save_path:
-            plt.savefig(save_path)
-            logger.info(f"Saved metrics plot to {save_path}")
-        plt.show()
+        if self.config.classification_mode == "binary":
+            self._plot_binary_metrics(epochs, save_path)
+        else:
+            self._plot_ternary_metrics(epochs, save_path)

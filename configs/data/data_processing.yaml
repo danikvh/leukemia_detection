@@ -17,7 +17,6 @@ qp_project: "/home/dan/data/ours/raw/annotations/project.qpproj"
 # Model configuration
 model:
   path: "/home/dan/models/best_model.pth"
-  device: "cuda"
   batch_size: 8
 
 # Output configuration

@@ -16,8 +16,6 @@ WSI Files (.svs) + GeoJSON Annotations
     WSIProcessor (Patch Extraction)
            ↓
     MaskToAnnotationConverter
-           ↓
-    GeoJSON Annotations + Training Data
 ```
 
 ## 📁 Module Structure
@@ -26,7 +24,6 @@ WSI Files (.svs) + GeoJSON Annotations
 data/
 ├── annotation_extractor.py    # Extract annotations and cell crops from WSI
 ├── config.py                  # Configuration settings
-├── geojson_processor.py       # GeoJSON file processing and validation
 ├── mask_converter.py          # Convert masks to GeoJSON annotations
 └── wsi_processor.py          # WSI patch extraction and processing
 ```
@@ -87,34 +84,6 @@ processor.extract_patches(
     stride=384,
     generate_mask=True,
     use_rois=False
-)
-```
-
-### GeoJSONProcessor
-
-Handles processing of GeoJSON annotation files with comprehensive validation and transformation capabilities.
-
-**Key Features:**
-
-* Load and validate GeoJSON files
-* Extract individual instances with crops and masks
-* Coordinate system transformations
-* Feature filtering and deduplication
-* Statistical analysis of annotations
-
-**Usage:**
-
-```python
-from data.geojson_processor import GeoJSONProcessor
-
-processor = GeoJSONProcessor()
-features = processor.load_geojson("annotations.geojson")
-instances_df = processor.extract_instances(
-    features=features,
-    image=slide_image,
-    output_dir="./instances",
-    save_crop=True,
-    save_mask=True
 )
 ```
 

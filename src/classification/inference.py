@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 class CellClassifier:
     """
     Handles inference for the cell classification model.
+    Supports both binary and ternary classification modes.
     """
     def __init__(
         self,
@@ -28,14 +29,16 @@ class CellClassifier:
         self.model = get_classification_model(
             model_name=config.model_name,
             pretrained=config.pretrained,
-            num_classes=1, # Always 1 for binary classification with BCEWithLogitsLoss
+            num_classes=config.num_classes,
             input_channels=3, # Assuming RGB input
-            input_image_size=config.image_size # For CustomCellClassifier
+            input_image_size=config.image_size,
+            classification_mode=config.classification_mode
         )
         self.model.load_state_dict(torch.load(model_path, map_location=self.device))
         self.model.eval() # Set model to evaluation mode
         self.model.to(self.device)
         logger.info(f"Classification model loaded from {model_path} on device: {self.device}")
+        logger.info(f"Classification mode: {config.classification_mode}")
 
         self.transform = get_classification_transforms(
             image_size=config.image_size,
@@ -46,6 +49,7 @@ class CellClassifier:
         
         self.confidence_threshold_high = config.confidence_threshold_high
         self.confidence_threshold_low = config.confidence_threshold_low
+        self.uncertainty_threshold = config.uncertainty_threshold
         
     def _preprocess_image(self, img_input: Union[str, Path, np.ndarray, Image.Image]) -> torch.Tensor:
         """Helper to load and preprocess a single image."""
@@ -96,7 +100,7 @@ class CellClassifier:
             
         return self.transform(img).unsqueeze(0) # Add batch dimension
 
-    def classify_single_image(self, img_input: Union[str, Path, np.ndarray, Image.Image]) -> Dict[str, Union[str, float]]:
+    def classify_single_image(self, img_input: Union[str, Path, np.ndarray, Image.Image]) -> Dict[str, Union[str, float, List[float]]]:
         """
         Classifies a single cell image.
         
@@ -105,14 +109,23 @@ class CellClassifier:
                                                                    or a loaded NumPy array/PIL Image.
                                                                    
         Returns:
-            Dict[str, Union[str, float]]: A dictionary with 'prediction' (str) and 'probability' (float).
-                                          Prediction can be 'cancerous', 'non-cancerous', or 'uncertain'.
+            Dict[str, Union[str, float, List[float]]]: A dictionary with classification results.
+                For binary: {'prediction': str, 'probability': float}
+                For ternary: {'prediction': str, 'probabilities': List[float], 'confidence': float}
         """
         img_tensor = self._preprocess_image(img_input).to(self.device)
 
         with torch.no_grad():
-            logits = self.model(img_tensor)
-            probability = torch.sigmoid(logits).item() # Get scalar probability
+            outputs = self.model(img_tensor)
+            
+            if self.config.classification_mode == "binary":
+                return self._process_binary_output(outputs)
+            else:
+                return self._process_ternary_output(outputs)
+
+    def _process_binary_output(self, outputs: torch.Tensor) -> Dict[str, Union[str, float]]:
+        """Process outputs for binary classification."""
+        probability = torch.sigmoid(outputs).item()
 
         if probability >= self.confidence_threshold_high:
             prediction = "cancerous"
@@ -121,9 +134,44 @@ class CellClassifier:
         else:
             prediction = "uncertain"
         
-        return {"prediction": prediction, "probability": probability}
+        return {
+            "prediction": prediction, 
+            "probability": probability,
+            "confidence": max(probability, 1.0 - probability)  # Distance from 0.5
+        }
 
-    def classify_batch(self, img_inputs: List[Union[str, Path, np.ndarray, Image.Image]]) -> List[Dict[str, Union[str, float]]]:
+    def _process_ternary_output(self, outputs: torch.Tensor) -> Dict[str, Union[str, List[float], float]]:
+        """Process outputs for ternary classification."""
+        probabilities = torch.softmax(outputs, dim=1).squeeze().cpu().numpy()
+        max_prob_idx = np.argmax(probabilities)
+        max_prob = probabilities[max_prob_idx]
+        
+        # Calculate confidence as difference between highest and second highest probability
+        sorted_probs = np.sort(probabilities)[::-1]  # Sort in descending order
+        confidence = sorted_probs[0] - sorted_probs[1]
+        
+        class_names = ["non-cancerous", "cancerous", "false-positive"]
+        
+        # Determine prediction based on confidence and thresholds
+        if confidence < self.uncertainty_threshold:
+            prediction = "uncertain"
+        elif max_prob >= self.confidence_threshold_high:
+            prediction = class_names[max_prob_idx]
+        elif max_prob <= self.confidence_threshold_low:
+            prediction = "uncertain"
+        else:
+            prediction = class_names[max_prob_idx]
+        
+        return {
+            "prediction": prediction,
+            "probabilities": probabilities.tolist(),
+            "confidence": confidence,
+            "class_probabilities": {
+                class_names[i]: float(prob) for i, prob in enumerate(probabilities)
+            }
+        }
+
+    def classify_batch(self, img_inputs: List[Union[str, Path, np.ndarray, Image.Image]]) -> List[Dict[str, Union[str, float, List[float]]]]:
         """
         Classifies a batch of cell images.
         
@@ -131,7 +179,7 @@ class CellClassifier:
             img_inputs (List[Union[str, Path, np.ndarray, Image.Image]]): List of image inputs.
                                                                            
         Returns:
-            List[Dict[str, Union[str, float]]]: A list of classification results for each image.
+            List[Dict[str, Union[str, float, List[float]]]]: A list of classification results for each image.
         """
         if not img_inputs:
             return []
@@ -146,18 +194,83 @@ class CellClassifier:
         batch_tensor = torch.stack(processed_tensors).to(self.device)
 
         with torch.no_grad():
-            logits = self.model(batch_tensor)
-            probabilities = torch.sigmoid(logits).cpu().numpy().flatten()
+            outputs = self.model(batch_tensor)
+            
+            if self.config.classification_mode == "binary":
+                return self._process_binary_batch_output(outputs)
+            else:
+                return self._process_ternary_batch_output(outputs)
 
+    def _process_binary_batch_output(self, outputs: torch.Tensor) -> List[Dict[str, Union[str, float]]]:
+        """Process batch outputs for binary classification."""
+        probabilities = torch.sigmoid(outputs).cpu().numpy().flatten()
+        
         results = []
         for prob in probabilities:
-            prediction = ""
             if prob >= self.confidence_threshold_high:
                 prediction = "cancerous"
             elif prob <= self.confidence_threshold_low:
                 prediction = "non-cancerous"
             else:
                 prediction = "uncertain"
-            results.append({"prediction": prediction, "probability": prob})
+            results.append({
+                "prediction": prediction, 
+                "probability": float(prob),
+                "confidence": max(prob, 1.0 - prob)
+            })
             
         return results
+
+    def _process_ternary_batch_output(self, outputs: torch.Tensor) -> List[Dict[str, Union[str, List[float], float]]]:
+        """Process batch outputs for ternary classification."""
+        probabilities_batch = torch.softmax(outputs, dim=1).cpu().numpy()
+        class_names = ["non-cancerous", "cancerous", "false-positive"]
+        
+        results = []
+        for probabilities in probabilities_batch:
+            max_prob_idx = np.argmax(probabilities)
+            max_prob = probabilities[max_prob_idx]
+            
+            # Calculate confidence
+            sorted_probs = np.sort(probabilities)[::-1]
+            confidence = sorted_probs[0] - sorted_probs[1]
+            
+            # Determine prediction
+            if confidence < self.uncertainty_threshold:
+                prediction = "uncertain"
+            elif max_prob >= self.confidence_threshold_high:
+                prediction = class_names[max_prob_idx]
+            elif max_prob <= self.confidence_threshold_low:
+                prediction = "uncertain"
+            else:
+                prediction = class_names[max_prob_idx]
+            
+            results.append({
+                "prediction": prediction,
+                "probabilities": probabilities.tolist(),
+                "confidence": float(confidence),
+                "class_probabilities": {
+                    class_names[i]: float(prob) for i, prob in enumerate(probabilities)
+                }
+            })
+            
+        return results
+
+    def get_model_info(self) -> Dict[str, Union[str, int, float]]:
+        """
+        Returns information about the loaded model and configuration.
+        
+        Returns:
+            Dict[str, Union[str, int, float]]: Model information.
+        """
+        return {
+            "classification_mode": self.config.classification_mode,
+            "model_name": self.config.model_name,
+            "num_classes": self.config.num_classes,
+            "image_size": self.config.image_size,
+            "confidence_threshold_high": self.confidence_threshold_high,
+            "confidence_threshold_low": self.confidence_threshold_low,
+            "uncertainty_threshold": self.uncertainty_threshold,
+            "class_names": self.config.class_names,
+            "device": str(self.device)
+        }

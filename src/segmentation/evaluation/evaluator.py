@@ -78,93 +78,109 @@ class SegmentationEvaluator:
     def evaluate_batch(self,
                       pred_masks: List[Union[np.ndarray, torch.Tensor]],
                       gt_masks: List[Union[np.ndarray, torch.Tensor]],
-                      aggregate: bool = True,
-                      **kwargs) -> Dict[str, Union[Dict[str, float], List[Dict[str, float]]]]:
+                      scores_list: List[np.ndarray] = None,
+                      **kwargs) -> Dict[str, Dict[str, float]]:
         """
-        Evaluate a batch of predictions.
+        Evaluate a batch of predictions using proper batch processing.
         
         Args:
             pred_masks: List of predicted instance masks
             gt_masks: List of ground truth instance masks
-            aggregate: Whether to aggregate results across the batch
+            scores_list: List of prediction scores (for COCO evaluation)
             **kwargs: Additional arguments for specific evaluators
             
         Returns:
-            Dictionary with aggregated or individual results from each method
+            Dictionary with aggregated results from each method
         """
         if len(pred_masks) != len(gt_masks):
             raise ValueError("Number of predictions and ground truths must match")
         
-        batch_results = {method: [] for method in self.evaluators.keys()}
+        # Convert all masks to numpy arrays
+        pred_masks_np = [self._to_numpy(mask) for mask in pred_masks]
+        gt_masks_np = [self._to_numpy(mask) for mask in gt_masks]
         
-        # Evaluate each pair
-        for pred_mask, gt_mask in zip(pred_masks, gt_masks):
-            single_results = self.evaluate_single(pred_mask, gt_mask, **kwargs)
-            for method, result in single_results.items():
-                batch_results[method].append(result)
+        batch_results = {}
         
-        if not aggregate:
-            return batch_results
+        # Hungarian method - proper batch aggregation
+        if 'hungarian' in self.evaluators:
+            try:
+                batch_results['hungarian'] = self.evaluators['hungarian'].evaluate_batch(
+                    pred_masks_np, gt_masks_np, **kwargs
+                )
+            except Exception as e:
+                print(f"Error in hungarian batch evaluation: {e}")
+                batch_results['hungarian'] = {}
         
-        # Aggregate results
-        aggregated = {}
-        for method, results_list in batch_results.items():
-            if not results_list or not results_list[0]:  # Skip empty results
-                continue
-                
-            # Get all metric names from first non-empty result
-            metric_names = results_list[0].keys()
-            aggregated[method] = {}
-            
-            for metric in metric_names:
-                values = [r.get(metric, 0.0) for r in results_list if r]
-                if values:
-                    aggregated[method][metric] = np.mean(values)
-                    aggregated[method][f"{metric}_std"] = np.std(values)
+        # DeepCell method - uses DeepCell's native batch processing
+        if 'deepcell' in self.evaluators:
+            try:
+                batch_results['deepcell'] = self.evaluators['deepcell'].evaluate_batch(
+                    pred_masks_np, gt_masks_np, **kwargs
+                )
+            except Exception as e:
+                print(f"Error in deepcell batch evaluation: {e}")
+                batch_results['deepcell'] = {}
         
-        return aggregated
+        # COCO method - accumulate all annotations then evaluate
+        if 'coco' in self.evaluators:
+            try:
+                batch_results['coco'] = self.evaluators['coco'].evaluate_batch(
+                    pred_masks_np, gt_masks_np, scores_list, **kwargs
+                )
+            except Exception as e:
+                print(f"Error in coco batch evaluation: {e}")
+                batch_results['coco'] = {}
+        
+        return batch_results
+    
+    def _to_numpy(self, mask: Union[np.ndarray, torch.Tensor]) -> np.ndarray:
+        """Convert tensor to numpy array if needed."""
+        return mask.cpu().numpy() if isinstance(mask, torch.Tensor) else mask
     
     def get_summary_metrics(self, results: Dict[str, Dict[str, float]]) -> Dict[str, float]:
         """
         Extract key summary metrics from evaluation results.
+        Prioritizes metrics from the most comprehensive evaluation method available.
         
         Args:
-            results: Results from evaluate_single or evaluate_batch
+            results: Results from evaluate_batch
             
         Returns:
             Dictionary with key metrics
         """
         summary = {}
         
-        # Hungarian/Instance metrics
-        if 'hungarian' in results:
-            hungarian = results['hungarian']
+        # Priority order: DeepCell -> Hungarian
+        primary_method = None
+        if 'deepcell' in results and results['deepcell']:
+            primary_method = 'deepcell'
+        elif 'hungarian' in results and results['hungarian']:
+            primary_method = 'hungarian'
+        
+        # Extract core metrics from primary method
+        if primary_method:
+            primary = results[primary_method]
             summary.update({
-                'precision': hungarian.get('precision', 0.0),
-                'recall': hungarian.get('recall', 0.0),
-                'f1': hungarian.get('f1', 0.0),
-                'jaccard': hungarian.get('jaccard', 0.0),
-                'dice': hungarian.get('dice', 0.0)
+                'precision': primary.get('precision', 0.0),
+                'recall': primary.get('recall', 0.0),
+                'f1': primary.get('f1', 0.0),
+                'jaccard': primary.get('jaccard', 0.0),
+                'dice': primary.get('dice', 0.0),
+                'true_positives': primary.get('true_positives', 0),
+                'false_positives': primary.get('false_positives', 0),
+                'false_negatives': primary.get('false_negatives', 0)
             })
         
-        # COCO metrics
-        if 'coco' in results:
+        # Add COCO metrics if available
+        if 'coco' in results and results['coco']:
             coco = results['coco']
             summary.update({
                 'AP': coco.get('AP', 0.0),
                 'AP50': coco.get('AP50', 0.0),
-                'AP75': coco.get('AP75', 0.0)
-            })
-        
-        # DeepCell metrics (if different from Hungarian)
-        if 'deepcell' in results and 'hungarian' not in results:
-            deepcell = results['deepcell']
-            summary.update({
-                'precision': deepcell.get('precision', 0.0),
-                'recall': deepcell.get('recall', 0.0),
-                'f1': deepcell.get('f1', 0.0),
-                'jaccard': deepcell.get('jaccard', 0.0),
-                'dice': deepcell.get('dice', 0.0)
+                'AP75': coco.get('AP75', 0.0),
+                'AP_small': coco.get('AP_small', 0.0),
+                'AP_medium': coco.get('AP_medium', 0.0),
+                'AP_large': coco.get('AP_large', 0.0)
             })
         
         return summary
@@ -181,10 +197,28 @@ class SegmentationEvaluator:
         print("=" * len(title))
         
         for method, metrics in results.items():
+            if not metrics:  # Skip empty results
+                continue
+                
             print(f"\n{method.upper()} Metrics:")
             print("-" * (len(method) + 9))
-            for metric, value in metrics.items():
-                if isinstance(value, float):
-                    print(f"  {metric:<12}: {value:.4f}")
-                else:
-                    print(f"  {metric:<12}: {value}")
+            
+            # Core metrics first
+            core_metrics = ['precision', 'recall', 'f1', 'jaccard', 'dice']
+            ap_metrics = ['AP', 'AP50', 'AP75', 'AP_small', 'AP_medium', 'AP_large']
+            count_metrics = ['true_positives', 'false_positives', 'false_negatives']
+            
+            # Print core metrics
+            for metric in core_metrics:
+                if metric in metrics and isinstance(metrics[metric], (int, float)):
+                    print(f"  {metric:<15}: {metrics[metric]:.4f}")
+            
+            # Print AP metrics if available
+            for metric in ap_metrics:
+                if metric in metrics and isinstance(metrics[metric], (int, float)):
+                    print(f"  {metric:<15}: {metrics[metric]:.4f}")
+            
+            # Print count metrics
+            for metric in count_metrics:
+                if metric in metrics and isinstance(metrics[metric], (int, float)):
+                    print(f"  {metric:<15}: {int(metrics[metric])}")

@@ -260,7 +260,7 @@ class WSIProcessor:
             result = inference_engine.segment_single_image(image, filename)
             mask_np = result.mask
 
-            if mask_np is None:
+            if result.success is False:
                 return None, None
             
             mask = Image.fromarray((mask_np.squeeze() * 255).astype(np.uint8)).convert("RGB")
