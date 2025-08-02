@@ -1,0 +1,17 @@
+# File paths
+output_dir: "../results/patch_extraction/bbox0.55"
+svs_dir: "../data/lafe/raw/Image"
+qupath_project: "../data/lafe/raw/annotations/project.qpproj"
+model_path: "../models/segmentation_iteration2_fulldataset_ihc_s2loss_1_90_11.pth"
+
+# Outputs
+show_results: false
+
+# Data processing parameters
+generate_mask: true
+patch_size: 512
+stride: 384
+bbox_threshold: 0.55
+
+use_rois: false
+no_mask: false

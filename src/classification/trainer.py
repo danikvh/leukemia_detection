@@ -303,3 +303,144 @@ class ClassificationTrainer:
             self._plot_binary_metrics(epochs, save_path)
         else:
             self._plot_ternary_metrics(epochs, save_path)
+    
+    def _plot_binary_metrics(self, epochs: range, save_path: Optional[Path] = None) -> None:
+        """Plot metrics for binary classification."""
+        fig, axes = plt.subplots(2, 3, figsize=(18, 12))
+        fig.suptitle(f'Binary Classification Training Metrics', fontsize=16)
+        
+        # Loss
+        axes[0, 0].plot(epochs, self.metrics_history['train_loss'], 'b-', label='Train Loss')
+        axes[0, 0].plot(epochs, self.metrics_history['val_loss'], 'r-', label='Val Loss')
+        axes[0, 0].set_title('Loss')
+        axes[0, 0].set_xlabel('Epoch')
+        axes[0, 0].set_ylabel('Loss')
+        axes[0, 0].legend()
+        axes[0, 0].grid(True)
+        
+        # Accuracy
+        axes[0, 1].plot(epochs, self.metrics_history['val_accuracy'], 'g-', label='Val Accuracy')
+        axes[0, 1].set_title('Accuracy')
+        axes[0, 1].set_xlabel('Epoch')
+        axes[0, 1].set_ylabel('Accuracy')
+        axes[0, 1].legend()
+        axes[0, 1].grid(True)
+        
+        # Precision
+        axes[0, 2].plot(epochs, self.metrics_history['val_precision'], 'm-', label='Val Precision')
+        axes[0, 2].set_title('Precision')
+        axes[0, 2].set_xlabel('Epoch')
+        axes[0, 2].set_ylabel('Precision')
+        axes[0, 2].legend()
+        axes[0, 2].grid(True)
+        
+        # Recall
+        axes[1, 0].plot(epochs, self.metrics_history['val_recall'], 'c-', label='Val Recall')
+        axes[1, 0].set_title('Recall')
+        axes[1, 0].set_xlabel('Epoch')
+        axes[1, 0].set_ylabel('Recall')
+        axes[1, 0].legend()
+        axes[1, 0].grid(True)
+        
+        # F1 Score
+        axes[1, 1].plot(epochs, self.metrics_history['val_f1'], 'orange', label='Val F1')
+        axes[1, 1].set_title('F1 Score')
+        axes[1, 1].set_xlabel('Epoch')
+        axes[1, 1].set_ylabel('F1 Score')
+        axes[1, 1].legend()
+        axes[1, 1].grid(True)
+        
+        # AUC and Undecided Percentage
+        ax_auc = axes[1, 2]
+        ax_undecided = ax_auc.twinx()
+        
+        line1 = ax_auc.plot(epochs, self.metrics_history['val_auc'], 'purple', label='Val AUC')
+        line2 = ax_undecided.plot(epochs, [x * 100 for x in self.metrics_history['val_undecided_percentage']], 
+                                 'brown', linestyle='--', label='Undecided %')
+        
+        ax_auc.set_title('AUC and Undecided Percentage')
+        ax_auc.set_xlabel('Epoch')
+        ax_auc.set_ylabel('AUC', color='purple')
+        ax_undecided.set_ylabel('Undecided %', color='brown')
+        
+        # Combine legends
+        lines = line1 + line2
+        labels = [l.get_label() for l in lines]
+        ax_auc.legend(lines, labels, loc='center right')
+        
+        ax_auc.grid(True)
+        
+        plt.tight_layout()
+        
+        if save_path:
+            plt.savefig(save_path, dpi=300, bbox_inches='tight')
+            logger.info(f"Binary metrics plot saved to {save_path}")
+        
+        plt.show()
+    
+    def _plot_ternary_metrics(self, epochs: range, save_path: Optional[Path] = None) -> None:
+        """Plot metrics for ternary classification."""
+        fig, axes = plt.subplots(2, 3, figsize=(18, 12))
+        fig.suptitle(f'Ternary Classification Training Metrics', fontsize=16)
+        
+        # Loss
+        axes[0, 0].plot(epochs, self.metrics_history['train_loss'], 'b-', label='Train Loss')
+        axes[0, 0].plot(epochs, self.metrics_history['val_loss'], 'r-', label='Val Loss')
+        axes[0, 0].set_title('Loss')
+        axes[0, 0].set_xlabel('Epoch')
+        axes[0, 0].set_ylabel('Loss')
+        axes[0, 0].legend()
+        axes[0, 0].grid(True)
+        
+        # Accuracy
+        axes[0, 1].plot(epochs, self.metrics_history['val_accuracy'], 'g-', label='Val Accuracy')
+        axes[0, 1].set_title('Accuracy')
+        axes[0, 1].set_xlabel('Epoch')
+        axes[0, 1].set_ylabel('Accuracy')
+        axes[0, 1].legend()
+        axes[0, 1].grid(True)
+        
+        # Precision (Macro vs Weighted)
+        axes[0, 2].plot(epochs, self.metrics_history['val_precision_macro'], 'm-', label='Precision (Macro)')
+        axes[0, 2].plot(epochs, self.metrics_history['val_precision_weighted'], 'm--', label='Precision (Weighted)')
+        axes[0, 2].set_title('Precision')
+        axes[0, 2].set_xlabel('Epoch')
+        axes[0, 2].set_ylabel('Precision')
+        axes[0, 2].legend()
+        axes[0, 2].grid(True)
+        
+        # Recall (Macro vs Weighted)
+        axes[1, 0].plot(epochs, self.metrics_history['val_recall_macro'], 'c-', label='Recall (Macro)')
+        axes[1, 0].plot(epochs, self.metrics_history['val_recall_weighted'], 'c--', label='Recall (Weighted)')
+        axes[1, 0].set_title('Recall')
+        axes[1, 0].set_xlabel('Epoch')
+        axes[1, 0].set_ylabel('Recall')
+        axes[1, 0].legend()
+        axes[1, 0].grid(True)
+        
+        # F1 Score (Macro vs Weighted)
+        axes[1, 1].plot(epochs, self.metrics_history['val_f1_macro'], 'orange', label='F1 (Macro)')
+        axes[1, 1].plot(epochs, self.metrics_history['val_f1_weighted'], 'red', label='F1 (Weighted)')
+        axes[1, 1].set_title('F1 Score')
+        axes[1, 1].set_xlabel('Epoch')
+        axes[1, 1].set_ylabel('F1 Score')
+        axes[1, 1].legend()
+        axes[1, 1].grid(True)
+        
+        # All metrics combined
+        axes[1, 2].plot(epochs, self.metrics_history['val_accuracy'], 'g-', label='Accuracy')
+        axes[1, 2].plot(epochs, self.metrics_history['val_f1_macro'], 'orange', label='F1 (Macro)')
+        axes[1, 2].plot(epochs, self.metrics_history['val_f1_weighted'], 'red', label='F1 (Weighted)')
+        axes[1, 2].set_title('Combined Metrics')
+        axes[1, 2].set_xlabel('Epoch')
+        axes[1, 2].set_ylabel('Score')
+        axes[1, 2].legend()
+        axes[1, 2].grid(True)
+        
+        plt.tight_layout()
+        
+        if save_path:
+            plt.savefig(save_path, dpi=300, bbox_inches='tight')
+            logger.info(f"Ternary metrics plot saved to {save_path}")
+        
+        plt.show()

@@ -4,17 +4,16 @@
 classification_mode: "binary"
 
 # Data paths
-data_dir: "data/classified_cells"
-labels_csv: "data/classified_cells/binary_labels.csv"
+output_dir: "../results/cell_classification"
+data_dir: "../data/lafe/processed/processed_annotations/cells"
+labels_csv: "../data/lafe/processed/processed_annotations/all_cell_labels.csv"
 
 # Image preprocessing
 image_size: 96
-normalize_mean: [0.485, 0.456, 0.406]
-normalize_std: [0.229, 0.224, 0.225]
 
 # Training parameters
 batch_size: 32
-epochs: 50
+epochs: 100
 learning_rate: 0.0001
 optimizer: "AdamW"
 loss_function: "auto"  # Will be set to BCEWithLogitsLoss automatically

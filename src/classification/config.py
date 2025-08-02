@@ -8,9 +8,10 @@ class ClassificationConfig:
     """Configuration class for cell classification."""
 
     # Classification mode
-    classification_mode: str = "binary"  # NEW: Options: "binary", "ternary"
+    classification_mode: str = "binary"  # Options: "binary", "ternary"
     
     # Data paths
+    output_dir: str = "results/cell_classification" # Output directory
     data_dir: str = "data/classified_cells" # Directory containing individual cell images (output from segmentation)
     labels_csv: str = "data/classified_cells/labels.csv" # Path to CSV with labels (e.g., filename, label)
 

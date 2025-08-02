@@ -1,0 +1,33 @@
+batch_size: 32
+classification_mode: binary
+confidence_threshold_high: 0.9
+confidence_threshold_low: 0.3
+data_dir: ../data/lafe/processed/processed_annotations/cells
+early_stopping_metric: val_f1
+epochs: 100
+image_size: 96
+labels_csv: ../data/lafe/processed/processed_annotations/all_cell_labels.csv
+learning_rate: 0.0001
+loss_function: BCEWithLogitsLoss
+model_name: resnet18
+normalize_mean:
+- 0.485
+- 0.456
+- 0.406
+normalize_std:
+- 0.229
+- 0.224
+- 0.225
+num_workers: 4
+optimizer: AdamW
+output_dir: ../results/cell_classification
+patience: 10
+pin_memory: true
+pretrained: true
+random_seed: 42
+test_split: 0.1
+train_split: 0.8
+uncertainty_threshold: 0.1
+use_class_weights: true
+val_split: 0.1
+weight_decay: 1.0e-05

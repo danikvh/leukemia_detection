@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Data Processing CLI Script
+Enhanced Data Processing CLI Script
 
 This script provides command-line interface for processing WSI files,
-extracting annotations, and converting between formats.
+extracting annotations, extracting individual cells, and converting between formats.
 
 Examples:
-    - python .\data_processing.py extract-patches --output-dir ../data/lafe/processed/processed_cellsam --svs-dir ../data/lafe/raw/Image --qupath-project ../data/lafe/raw/annotations/project.qpproj --generate-mask
+    - python .\data_processing.py extract-patches --output-dir ../data/lafe/processed/processed_cellsam --svs-dir ../data/lafe/raw/Image --qupath-project ../data/lafe/raw/annotations/project.qpproj --generate-mask --extract-cells
 
     - python .\data_processing.py --output-dir ../data/lafe/processed/processed_annotations extract-annotations --svs-dir ../data/lafe/raw/Image --geojson-dir ../data/lafe/annotations/iteration2
 
@@ -27,7 +27,7 @@ from paquo.projects import QuPathProject
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from data.annotation_extractor import AnnotationExtractor, merge_cell_label_csvs
-from data.wsi_processor import WSIProcessor
+from data.wsi_processor import WSIProcessor, merge_wsi_cell_labels
 from data.mask_converter import MaskToAnnotationConverter
 from data.config import DataProcessingConfig
 from segmentation.utils.model_utils import load_cellsam_model
@@ -43,17 +43,11 @@ def setup_argparser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-    # Extract patches from WSI with model-generated masks
-    python data_processing.py extract-patches --svs-dir /data/svs --output-dir /data/processed --generate-mask
+    # Extract patches from WSI with model-generated masks and individual cells
+    python data_processing.py extract-patches --svs-dir /data/svs --output-dir /data/processed --generate-mask --extract-cells
     
     # Extract annotations from QuPath project and GeoJSON
     python data_processing.py extract-annotations --geojson-dir /data/annotations --output-dir /data/processed
-    
-    # Convert masks to GeoJSON format
-    python data_processing.py convert-masks --input-dir /data/processed --output-dir /data/geojson
-    
-    # Process GeoJSON to extract instances
-    python data_processing.py process-geojson --geojson /data/annotations.geojson --output-dir /data/instances
         """
     )
     
@@ -76,7 +70,7 @@ Examples:
     
     # Extract patches command
     extract_parser = subparsers.add_parser(
-        "extract-patches", help="Extract patches from WSI files"
+        "extract-patches", help="Extract patches and cells from WSI files"
     )
     extract_parser.add_argument(
         "--svs-dir", type=str, help="Directory containing SVS files"
@@ -113,6 +107,24 @@ Examples:
         help="Skip mask generation/extraction"
     )
     
+    # Cell extraction arguments
+    extract_parser.add_argument(
+        "--cell-padding", type=int, default=10,
+        help="Padding around cell boundary for context (default: 10)"
+    )
+    extract_parser.add_argument(
+        "--use-rectangular-crops", action="store_true",
+        help="Use rectangular crops instead of masked cell shapes"
+    )
+    extract_parser.add_argument(
+        "--background-value", type=int, default=None,
+        help="Background pixel value for masked cells (255=white, 0=black)"
+    )
+    extract_parser.add_argument(
+        "--min-cell-area", type=float, default=50.0,
+        help="Minimum cell area in pixels to be considered valid"
+    )
+    
     # Extract annotations command
     annotations_parser = subparsers.add_parser(
         "extract-annotations", help="Extract annotations from GeoJSON files"
@@ -133,13 +145,21 @@ Examples:
         "--cell-padding", type=int, default=0,
         help="Padding around individual cell crops"
     )
+    annotations_parser.add_argument(
+        "--use-rectangular-crops", action="store_true",
+        help="Use rectangular crops instead of masked cell shapes"
+    )
+    annotations_parser.add_argument(
+        "--background-value", type=int, default=None,
+        help="Background pixel value for masked cells (255=white, 0=black)"
+    )
     
     return parser
 
 
 def extract_patches_command(args, config: DataProcessingConfig) -> None:
     """Execute patch extraction command."""
-    logger.info("Starting patch extraction")
+    logger.info("Starting patch extraction with cell extraction capability")
     
     # Load QuPath project
     qp = QuPathProject(args.qupath_project, mode='r')
@@ -157,6 +177,7 @@ def extract_patches_command(args, config: DataProcessingConfig) -> None:
     # Process SVS files
     processor = WSIProcessor(config)
     processed_count = 0
+    total_cells_extracted = 0
     
     for svs_file in Path(args.svs_dir).rglob("*.svs"):
         svs_name = svs_file.name
@@ -174,7 +195,7 @@ def extract_patches_command(args, config: DataProcessingConfig) -> None:
         )
         
         try:
-            processor.extract_patches(
+            processor.extract_patches_and_cells(
                 str(svs_file), output_subdir, qp_img,
                 patch_size=args.patch_size,
                 stride=args.stride or args.patch_size,
@@ -182,7 +203,11 @@ def extract_patches_command(args, config: DataProcessingConfig) -> None:
                 bbox_threshold=args.bbox_threshold,
                 generate_mask=args.generate_mask,
                 use_rois=args.use_rois,
-                save_masks=not args.no_masks
+                save_masks=not args.no_masks,
+                cell_crop_padding=args.cell_padding,
+                use_mask_shape=not args.use_rectangular_crops,
+                background_value=args.background_value,
+                min_cell_area=args.min_cell_area
             )
             
             # Convert masks to GeoJSON if generated
@@ -192,13 +217,25 @@ def extract_patches_command(args, config: DataProcessingConfig) -> None:
                     output_subdir, svs_file.stem
                 )
             
+            # Count extracted cells
+            cells_dir = os.path.join(output_subdir, "cells")
+            if os.path.exists(cells_dir):
+                cell_count = len([f for f in os.listdir(cells_dir) if f.endswith('.png')])
+                total_cells_extracted += cell_count
+                logger.info(f"Extracted {cell_count} cells from {svs_name}")
+            
             processed_count += 1
             
         except Exception as e:
             logger.error(f"Error processing {svs_name}: {e}")
             continue
     
+    # Merge cell labels if cells were extracted
+    if processed_count > 0:
+        merge_wsi_cell_labels(args.output_dir)
+    
     logger.info(f"Successfully processed {processed_count} SVS files")
+    logger.info(f"Total cells extracted: {total_cells_extracted}")
 
 
 def extract_annotations_command(args, config: DataProcessingConfig) -> None:
@@ -221,7 +258,10 @@ def extract_annotations_command(args, config: DataProcessingConfig) -> None:
         try:
             extractor.extract_annotations(
                 svs_path, geojson_path, args.output_dir,
-                image_name, args.cell_padding
+                image_name, 
+                cell_crop_padding=args.cell_padding,
+                background_value=args.background_value,
+                use_mask_shape=not args.use_rectangular_crops
             )
             processed_count += 1
             
@@ -234,6 +274,7 @@ def extract_annotations_command(args, config: DataProcessingConfig) -> None:
         merge_cell_label_csvs(args.output_dir)
     
     logger.info(f"Successfully processed {processed_count} annotation sets")
+
 
 def load_file_mappings(
     svs_dir: str, 
@@ -279,12 +320,58 @@ def load_file_mappings(
     return mappings
 
 
+def setup_logging_config(args):
+    """Setup logging configuration."""
+    log_level = getattr(logging, args.log_level.upper())
+    
+    # Configure logging
+    logging.basicConfig(
+        level=log_level,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.StreamHandler(),
+            logging.FileHandler(os.path.join(args.output_dir, 'processing.log'))
+        ]
+    )
+
+
+def validate_args(args):
+    """Validate command line arguments."""
+    if not args.command:
+        raise ValueError("No command specified")
+    
+    if not args.output_dir:
+        raise ValueError("Output directory must be specified")
+    
+    if args.command == "extract-patches":
+        if not args.svs_dir or not args.qupath_project:
+            raise ValueError("SVS directory and QuPath project must be specified for patch extraction")
+        
+        if not os.path.exists(args.svs_dir):
+            raise ValueError(f"SVS directory does not exist: {args.svs_dir}")
+        
+        if not os.path.exists(args.qupath_project):
+            raise ValueError(f"QuPath project does not exist: {args.qupath_project}")
+    
+    elif args.command == "extract-annotations":
+        if not args.svs_dir or not args.geojson_dir:
+            raise ValueError("SVS directory and GeoJSON directory must be specified for annotation extraction")
+        
+        if not os.path.exists(args.svs_dir):
+            raise ValueError(f"SVS directory does not exist: {args.svs_dir}")
+        
+        if not os.path.exists(args.geojson_dir):
+            raise ValueError(f"GeoJSON directory does not exist: {args.geojson_dir}")
+        
+
 def main():
     """Main entry point."""
+    # Parse config first
     partial_parser = argparse.ArgumentParser(add_help=False)
     partial_parser.add_argument("--config", type=str, default=None)
     partial_args, _ = partial_parser.parse_known_args()
 
+    # Load configuration
     config = DataProcessingConfig()
     if partial_args.config:
         config.load_from_file(partial_args.config)
@@ -292,6 +379,7 @@ def main():
     else:
         config_dict = {}
 
+    # Parse full arguments
     parser = setup_argparser()
     args = parser.parse_args()
 
@@ -308,11 +396,20 @@ def main():
 
     args = argparse.Namespace(**args_dict)
 
-    # Create output directory
-    os.makedirs(args.output_dir, exist_ok=True)
-    
-    # Execute command
     try:
+        # Validate arguments
+        validate_args(args)
+        
+        # Create output directory
+        os.makedirs(args.output_dir, exist_ok=True)
+        
+        # Setup logging
+        setup_logging_config(args)
+        
+        logger.info(f"Starting data processing with command: {args.command}")
+        logger.info(f"Output directory: {args.output_dir}")
+        
+        # Execute command
         if args.command == "extract-patches":
             extract_patches_command(args, config)
         elif args.command == "extract-annotations":

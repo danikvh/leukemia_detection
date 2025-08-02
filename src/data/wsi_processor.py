@@ -1,11 +1,12 @@
 """
-WSI Processor Module
+Enhanced WSI Processor Module
 
 This module handles processing of Whole Slide Images (WSI) for patch extraction
-and annotation processing.
+and individual cell extraction from generated masks.
 """
 
 import os
+import csv
 import logging
 from typing import List, Tuple, Optional, Dict, Any
 from pathlib import Path
@@ -15,6 +16,8 @@ import openslide
 from PIL import Image, PngImagePlugin
 from shapely.geometry import Polygon
 import torch
+import cv2
+import shapely.affinity
 
 from data.config import DataProcessingConfig
 from common.utilities import ensure_dir
@@ -24,11 +27,11 @@ logger = logging.getLogger(__name__)
 
 
 class WSIProcessor:
-    """Processes WSI files for patch extraction and annotation handling."""
+    """Enhanced WSI processor that extracts patches and individual cells."""
     
     def __init__(self, config: Optional[DataProcessingConfig] = None):
         """
-        Initialize the WSI processor.
+        Initialize the enhanced WSI processor.
         
         Args:
             config: Configuration object containing processing parameters
@@ -36,7 +39,7 @@ class WSIProcessor:
         self.config = config or DataProcessingConfig()
         self.annotation_processor = AnnotationExtractor()
         
-    def extract_patches(
+    def extract_patches_and_cells(
         self,
         svs_file: str,
         output_dir: str,
@@ -47,10 +50,14 @@ class WSIProcessor:
         bbox_threshold: float = 0.4,
         generate_mask: bool = False,
         use_rois: bool = False,
-        save_masks: bool = True
+        save_masks: bool = True,
+        cell_crop_padding: int = 10,
+        use_mask_shape: bool = True,
+        background_value: int = 255,
+        min_cell_area: float = 50.0
     ) -> None:
         """
-        Extract patches from a WSI file.
+        Extract patches from a WSI file and individual cells from masks.
         
         Args:
             svs_file: Path to the SVS file
@@ -63,6 +70,10 @@ class WSIProcessor:
             generate_mask: Whether to generate masks using model
             use_rois: Whether to extract patches centered on ROIs
             save_masks: Whether to save mask outputs
+            cell_crop_padding: Padding around cell boundary for context
+            use_mask_shape: If True, extract cells with exact mask shape
+            background_value: Value for background pixels when use_mask_shape=True
+            min_cell_area: Minimum cell area to be considered valid
         """
         try:
             stride = stride or patch_size
@@ -78,15 +89,29 @@ class WSIProcessor:
                 slide, qp_img, patch_size, stride, use_rois
             )
             
+            # Initialize cell labels list for CSV
+            all_cell_labels = []
+            
             # Process each patch
             for idx, (x, y) in enumerate(coordinates):
-                self._process_patch(
+                patch_cell_labels = self._process_patch_with_cells(
                     slide, qp_img, x, y, patch_size, output_dir, file_name,
-                    model, bbox_threshold, generate_mask, save_masks
+                    model, bbox_threshold, generate_mask, save_masks,
+                    cell_crop_padding, use_mask_shape,
+                    background_value, min_cell_area, idx
                 )
+                
+                if patch_cell_labels:
+                    all_cell_labels.extend(patch_cell_labels)
+            
+            # Save consolidated cell labels CSV
+            if all_cell_labels:
+                self._save_all_cell_labels(all_cell_labels, output_dir, file_name)
             
             slide.close()
             logger.info(f"Completed processing {len(coordinates)} patches")
+            
+            logger.info(f"Extracted {len(all_cell_labels)} individual cells")
             
         except Exception as e:
             logger.error(f"Error processing WSI: {e}")
@@ -98,6 +123,8 @@ class WSIProcessor:
         
         if save_masks:
             directories.extend(["overlay", "masks/img", "masks/data"])
+        
+        directories.append("cells")
         
         for dir_name in directories:
             ensure_dir(os.path.join(output_dir, dir_name))
@@ -176,7 +203,7 @@ class WSIProcessor:
         
         return coordinates
     
-    def _process_patch(
+    def _process_patch_with_cells(
         self,
         slide: openslide.OpenSlide,
         qp_img: Any,
@@ -188,15 +215,20 @@ class WSIProcessor:
         model: Optional[torch.nn.Module],
         bbox_threshold: float,
         generate_mask: bool,
-        save_masks: bool
-    ) -> None:
-        """Process a single patch."""
+        save_masks: bool,
+        cell_crop_padding: int,
+        use_mask_shape: bool,
+        background_value: int,
+        min_cell_area: float,
+        patch_idx: int
+    ) -> List[Tuple[str, str]]:
+        """Process a single patch and extract individual cells."""
         out_filename = os.path.join(output_dir, f"images/{file_name}_{x}_{y}.png")
         
         # Skip if already exists
         if os.path.exists(out_filename):
             logger.debug(f"File exists, skipping: {out_filename}")
-            return
+            return []
         
         # Extract patch
         img = slide.read_region((max(0, x), max(0, y)), 0, (patch_size, patch_size))
@@ -205,7 +237,7 @@ class WSIProcessor:
         # Skip if mostly white/empty
         if np.mean(img_array) > 240:
             logger.debug(f"Skipping patch {x}_{y} (mostly white)")
-            return
+            return []
         
         # Generate or extract masks
         if generate_mask and model is not None:
@@ -214,7 +246,7 @@ class WSIProcessor:
             )
             if mask_np is None:
                 logger.debug(f"No mask generated for patch {x}_{y}")
-                return
+                return []
         else:
             mask, mask_np = self.annotation_processor.extract_annotations(
                 qp_img, x, y, patch_size, patch_size
@@ -223,13 +255,244 @@ class WSIProcessor:
         # Skip if no annotations/masks
         if not save_masks and np.mean(mask_np) == 0:
             logger.debug(f"Skipping patch {x}_{y} (no annotations)")
-            return
+            return []
+        
+        # Extract individual cells if requested
+        cell_labels = []
+        if mask_np is not None and np.max(mask_np) > 0:
+            cell_labels = self._extract_cells_from_mask(
+                slide, img, mask_np, x, y, output_dir, file_name,
+                patch_idx, cell_crop_padding, use_mask_shape,
+                background_value, min_cell_area
+            )
         
         # Save patch
         self._save_patch(
             img, mask, mask_np, out_filename, output_dir, 
             file_name, x, y, save_masks
         )
+        
+        return cell_labels
+    
+    def _extract_cells_from_mask(
+        self,
+        slide: openslide.OpenSlide,
+        patch_img: Image.Image,
+        mask_np: np.ndarray,
+        patch_x: int,
+        patch_y: int,
+        output_dir: str,
+        file_name: str,
+        patch_idx: int,
+        cell_crop_padding: int,
+        use_mask_shape: bool,
+        background_value: int,
+        min_cell_area: float
+    ) -> List[Tuple[str, str]]:
+        """Extract individual cells from a mask."""
+        cell_labels = []
+        
+        # Handle different mask formats
+        if mask_np.ndim == 3:
+            # Multi-label mask (each channel is a different label)
+            height, width, n_labels = mask_np.shape
+            combined_mask = np.zeros((height, width), dtype=np.int32)
+            
+            instance_id = 1
+            for label_idx in range(n_labels):
+                label_mask = mask_np[:, :, label_idx]
+                if np.max(label_mask) > 0:
+                    combined_mask[label_mask > 0] = instance_id
+                    instance_id += 1
+            
+            mask_to_process = combined_mask
+        else:
+            # Single mask or already instance mask
+            mask_to_process = mask_np.astype(np.int32)
+        
+        # Get unique instance IDs
+        unique_instances = np.unique(mask_to_process)
+        unique_instances = unique_instances[unique_instances > 0]
+        
+        for instance_id in unique_instances:
+            # Create binary mask for this instance
+            instance_mask = (mask_to_process == instance_id).astype(np.uint8)
+            
+            # Find contours
+            contours, _ = cv2.findContours(
+                instance_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+            )
+            
+            for contour_idx, contour in enumerate(contours):
+                if len(contour) < 3:
+                    continue
+                
+                # Calculate area
+                area = cv2.contourArea(contour)
+                if area < min_cell_area:
+                    continue
+                
+                # Create polygon from contour
+                contour_points = contour[:, 0, :].tolist()
+                if contour_points[0] != contour_points[-1]:
+                    contour_points.append(contour_points[0])
+                
+                try:
+                    from shapely.geometry import Polygon
+                    
+                    # Convert to absolute coordinates
+                    abs_contour_points = [
+                        [x + patch_x, y + patch_y] for x, y in contour_points
+                    ]
+                    cell_polygon = Polygon(abs_contour_points)
+                    
+                    if not cell_polygon.is_valid:
+                        continue
+                    
+                    # Extract cell crop
+                    if use_mask_shape:
+                        cell_crop = self._extract_masked_cell_from_wsi(
+                            slide, cell_polygon, cell_crop_padding, background_value
+                        )
+                    else:
+                        cell_crop = self._extract_rectangular_cell_from_wsi(
+                            slide, cell_polygon, cell_crop_padding
+                        )
+                    
+                    if cell_crop is not None:
+                        # Generate filename
+                        cell_filename = f"{file_name}_patch{patch_idx:03d}_cell{instance_id:03d}_{contour_idx:02d}.png"
+                        cell_path = os.path.join(output_dir, "cells", cell_filename)
+                        
+                        # Save cell image
+                        self._save_cell_image(cell_crop, cell_path)
+                        
+                        # For WSI processing, we don't have ground truth labels
+                        # So we mark them as "unknown" or "unlabeled"
+                        cell_labels.append((cell_filename, "unlabeled"))
+                        
+                except Exception as e:
+                    logger.debug(f"Error extracting cell: {e}")
+                    continue
+        
+        return cell_labels
+    
+    def _extract_rectangular_cell_from_wsi(
+        self,
+        slide: openslide.OpenSlide,
+        cell_polygon: Polygon,
+        padding: int
+    ) -> Optional[np.ndarray]:
+        """Extract rectangular cell crop from WSI."""
+        minx, miny, maxx, maxy = cell_polygon.bounds
+        minx = max(0, int(minx) - padding)
+        miny = max(0, int(miny) - padding)
+        maxx = int(maxx) + padding
+        maxy = int(maxy) + padding
+        
+        width = maxx - minx
+        height = maxy - miny
+        
+        if width <= 0 or height <= 0:
+            return None
+        
+        try:
+            patch = slide.read_region((minx, miny), 0, (width, height)).convert("RGB")
+            return np.array(patch)
+        except Exception as e:
+            logger.debug(f"Error extracting rectangular cell: {e}")
+            return None
+    
+    def _extract_masked_cell_from_wsi(
+        self,
+        slide: openslide.OpenSlide,
+        cell_polygon: Polygon,
+        padding: int,
+        background_value: int = 255
+    ) -> Optional[np.ndarray]:
+        """Extract masked cell crop from WSI."""
+        cell_minx, cell_miny, cell_maxx, cell_maxy = cell_polygon.bounds
+        
+        # Calculate crop bounds with padding
+        crop_minx = max(0, int(cell_minx) - padding)
+        crop_miny = max(0, int(cell_miny) - padding)
+        crop_maxx = int(cell_maxx) + padding
+        crop_maxy = int(cell_maxy) + padding
+        
+        crop_width = crop_maxx - crop_minx
+        crop_height = crop_maxy - crop_miny
+        
+        if crop_width <= 0 or crop_height <= 0:
+            return None
+        
+        try:
+            # Extract image patch
+            patch = slide.read_region((crop_minx, crop_miny), 0, (crop_width, crop_height)).convert("RGB")
+            crop_array = np.array(patch)
+            
+            # Create mask for the cell shape
+            cell_geom_local = shapely.affinity.translate(
+                cell_polygon, xoff=-crop_minx, yoff=-crop_miny
+            )
+                
+            # Draw mask
+            from PIL import ImageDraw
+            mask_img = Image.new("L", (crop_width, crop_height), 0)
+            draw = ImageDraw.Draw(mask_img)
+            
+            coords = list(cell_geom_local.exterior.coords)
+            draw.polygon(coords, fill=1)
+            cell_mask = np.array(mask_img)
+            
+            # Apply mask
+            if background_value is None:
+                # Create RGBA image with transparency
+                masked_image = np.zeros((crop_height, crop_width, 4), dtype=np.uint8)
+                masked_image[:, :, :3] = crop_array  # RGB channels
+                masked_image[:, :, 3] = cell_mask * 255  # Alpha channel
+            else:
+                # Create RGB image with solid background
+                masked_image = crop_array.copy()
+                background_pixels = cell_mask == 0
+                masked_image[background_pixels] = background_value
+            
+            return masked_image
+            
+        except Exception as e:
+            logger.debug(f"Error extracting masked cell: {e}")
+            return None
+    
+    def _save_cell_image(self, image: np.ndarray, save_path: str) -> None:
+        """Save cell image."""
+        try:
+            # Handle both RGB and RGBA images
+            if image.shape[2] == 4:  # RGBA
+                Image.fromarray(image, mode='RGBA').save(save_path)
+            else:  # RGB
+                Image.fromarray(image).save(save_path)
+        except Exception as e:
+            logger.debug(f"Error saving cell image: {e}")
+    
+    def _save_all_cell_labels(
+        self,
+        cell_labels: List[Tuple[str, str]],
+        output_dir: str,
+        file_name: str
+    ) -> None:
+        """Save all cell labels to CSV."""
+        if not cell_labels:
+            return
+        
+        csv_path = os.path.join(output_dir, f"{file_name}_cell_labels.csv")
+        try:
+            with open(csv_path, "w", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(["filename", "label"])
+                writer.writerows(cell_labels)
+            
+            logger.info(f"Saved {len(cell_labels)} cell labels to {csv_path}")
+        except Exception as e:
+            logger.error(f"Error saving cell labels: {e}")
     
     def _generate_mask_with_model(
         self,
@@ -293,7 +556,7 @@ class WSIProcessor:
         img_p = img_rgb.convert("P", palette=Image.ADAPTIVE, colors=256)
         img_p.save(out_filename, pnginfo=metadata)
         
-        if save_masks:
+        if save_masks and mask is not None:
             # Save overlay
             overlay = Image.blend(img_rgb, mask, alpha=0.3)
             overlay.save(
@@ -308,14 +571,15 @@ class WSIProcessor:
             )
             
             # Save individual label masks if 3D
-            if mask_np.ndim == 3:
+            if mask_np is not None and mask_np.ndim == 3:
                 self._save_label_masks(mask_np, output_dir, file_name, x, y)
             
             # Save numpy mask
-            np.save(
-                os.path.join(output_dir, f"masks/data/{file_name}_{x}_{y}.npy"),
-                mask_np
-            )
+            if mask_np is not None:
+                np.save(
+                    os.path.join(output_dir, f"masks/data/{file_name}_{x}_{y}.npy"),
+                    mask_np
+                )
         
         logger.debug(f"Saved patch {file_name}_{x}_{y}")
     
@@ -343,113 +607,29 @@ class WSIProcessor:
             )
 
 
-class PatchQualityFilter:
-    """Filters patches based on quality metrics."""
+def merge_wsi_cell_labels(root_dir: str, output_name: str = "all_wsi_cell_labels.csv") -> None:
+    """Merge multiple WSI cell label CSVs into a single file."""
+    import glob
+    import pandas as pd
     
-    def __init__(self, config: Optional[DataProcessingConfig] = None):
-        self.config = config or DataProcessingConfig()
+    csv_files = glob.glob(os.path.join(root_dir, "*_cell_labels.csv"))
     
-    def is_patch_valid(self, patch: np.ndarray) -> bool:
-        """
-        Check if a patch meets quality criteria.
-        
-        Args:
-            patch: Patch image as numpy array
-            
-        Returns:
-            True if patch is valid, False otherwise
-        """
-        # Check if mostly white/empty
-        if np.mean(patch) > self.config.white_threshold:
-            return False
-        
-        # Check variance (too uniform)
-        if np.var(patch) < self.config.variance_threshold:
-            return False
-        
-        # Additional quality checks can be added here
-        return True
+    if not csv_files:
+        logger.warning("No WSI cell label CSV files found to merge")
+        return
     
-    def filter_patches(self, patches: List[np.ndarray]) -> List[np.ndarray]:
-        """Filter a list of patches based on quality."""
-        return [patch for patch in patches if self.is_patch_valid(patch)]
-
-
-class WSIMetadataExtractor:
-    """Extracts metadata from WSI files."""
-    
-    @staticmethod
-    def extract_metadata(svs_file: str) -> Dict[str, Any]:
-        """
-        Extract metadata from WSI file.
-        
-        Args:
-            svs_file: Path to SVS file
-            
-        Returns:
-            Dictionary containing metadata
-        """
+    all_labels = []
+    for csv_path in csv_files:
         try:
-            slide = openslide.OpenSlide(svs_file)
-            
-            metadata = {
-                'filename': os.path.basename(svs_file),
-                'dimensions': slide.dimensions,
-                'level_count': slide.level_count,
-                'level_dimensions': slide.level_dimensions,
-                'level_downsamples': slide.level_downsamples,
-                'properties': dict(slide.properties)
-            }
-            
-            slide.close()
-            return metadata
-            
+            df = pd.read_csv(csv_path)
+            all_labels.append(df)
+            os.remove(csv_path)  # Clean up individual files
         except Exception as e:
-            logger.error(f"Error extracting metadata: {e}")
-            return {}
+            logger.warning(f"Error processing {csv_path}: {e}")
     
-    @staticmethod
-    def get_optimal_level(
-        svs_file: str, 
-        target_mpp: float = 0.25
-    ) -> Tuple[int, float]:
-        """
-        Get optimal pyramid level for target microns per pixel.
+    if all_labels:
+        merged_df = pd.concat(all_labels, ignore_index=True)
+        output_path = os.path.join(root_dir, output_name)
+        merged_df.to_csv(output_path, index=False)
         
-        Args:
-            svs_file: Path to SVS file
-            target_mpp: Target microns per pixel
-            
-        Returns:
-            Tuple of (level, actual_mpp)
-        """
-        try:
-            slide = openslide.OpenSlide(svs_file)
-            
-            # Get base MPP
-            try:
-                base_mpp = float(slide.properties[openslide.PROPERTY_NAME_MPP_X])
-            except (KeyError, ValueError):
-                logger.warning("MPP not found in slide properties, using default")
-                base_mpp = 0.25
-            
-            # Find best level
-            best_level = 0
-            best_diff = float('inf')
-            
-            for level in range(slide.level_count):
-                level_mpp = base_mpp * slide.level_downsamples[level]
-                diff = abs(level_mpp - target_mpp)
-                
-                if diff < best_diff:
-                    best_diff = diff
-                    best_level = level
-            
-            actual_mpp = base_mpp * slide.level_downsamples[best_level]
-            slide.close()
-            
-            return best_level, actual_mpp
-            
-        except Exception as e:
-            logger.error(f"Error finding optimal level: {e}")
-            return 0, 0.25
+        logger.info(f"Merged {len(csv_files)} WSI cell CSVs into {output_path} with {len(merged_df)} entries")
