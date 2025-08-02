@@ -16,6 +16,10 @@ import torch
 from torch.utils.data import DataLoader
 import json
 import pandas as pd
+import numpy as np
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score, confusion_matrix
+import matplotlib.pyplot as plt
+import seaborn as sns
 
 from classification.config import ClassificationConfig
 from classification.utils import (
@@ -38,7 +42,6 @@ logger = logging.getLogger(__name__)
 def setup_data_loaders(config: ClassificationConfig) -> tuple:
     """
     Set up data loaders for training, validation, and testing.
-    (Same as original implementation)
     """
     # Load labels
     label_map = load_classification_labels(
@@ -59,14 +62,25 @@ def setup_data_loaders(config: ClassificationConfig) -> tuple:
         title=f"Overall Class Distribution ({config.classification_mode.title()} Mode)"
     )
     
-    # Split data
-    train_data, val_data, test_data = split_data(
-        data_samples,
-        config.train_split,
-        config.val_split,
-        config.test_split,
-        config.random_seed
-    )
+    # Check if we're in train-only mode
+    is_train_only = (config.train_split == 1.0 and 
+                     config.val_split == 0.0 and 
+                     config.test_split == 0.0)
+    
+    if is_train_only:
+        logger.info("TRAIN-ONLY MODE: Using all data for training (no validation or test sets)")
+        train_data = data_samples
+        val_data = []
+        test_data = []
+    else:
+        # Split data normally
+        train_data, val_data, test_data = split_data(
+            data_samples,
+            config.train_split,
+            config.val_split,
+            config.test_split,
+            config.random_seed
+        )
     
     logger.info(f"Data splits - Train: {len(train_data)}, Val: {len(val_data)}, Test: {len(test_data)}")
     
@@ -86,15 +100,21 @@ def setup_data_loaders(config: ClassificationConfig) -> tuple:
         classification_mode=config.classification_mode, is_train=True
     )
     
-    val_dataset = CellClassificationDataset(
-        val_data, config.image_size, config.normalize_mean, config.normalize_std,
-        classification_mode=config.classification_mode, is_train=False
-    )
+    # Only create validation dataset if we have validation data
+    val_dataset = None
+    if val_data:
+        val_dataset = CellClassificationDataset(
+            val_data, config.image_size, config.normalize_mean, config.normalize_std,
+            classification_mode=config.classification_mode, is_train=False
+        )
     
-    test_dataset = CellClassificationDataset(
-        test_data, config.image_size, config.normalize_mean, config.normalize_std,
-        classification_mode=config.classification_mode, is_train=False
-    ) if test_data else None
+    # Only create test dataset if we have test data
+    test_dataset = None
+    if test_data:
+        test_dataset = CellClassificationDataset(
+            test_data, config.image_size, config.normalize_mean, config.normalize_std,
+            classification_mode=config.classification_mode, is_train=False
+        )
     
     # Create data loaders
     train_loader = DataLoader(
@@ -102,17 +122,178 @@ def setup_data_loaders(config: ClassificationConfig) -> tuple:
         num_workers=config.num_workers, pin_memory=config.pin_memory
     )
     
-    val_loader = DataLoader(
-        val_dataset, batch_size=config.batch_size, shuffle=False,
-        num_workers=config.num_workers, pin_memory=config.pin_memory
-    )
+    val_loader = None
+    if val_dataset:
+        val_loader = DataLoader(
+            val_dataset, batch_size=config.batch_size, shuffle=False,
+            num_workers=config.num_workers, pin_memory=config.pin_memory
+        )
     
-    test_loader = DataLoader(
-        test_dataset, batch_size=config.batch_size, shuffle=False,
-        num_workers=config.num_workers, pin_memory=config.pin_memory
-    ) if test_dataset else None
+    test_loader = None
+    if test_dataset:
+        test_loader = DataLoader(
+            test_dataset, batch_size=config.batch_size, shuffle=False,
+            num_workers=config.num_workers, pin_memory=config.pin_memory
+        )
     
     return train_loader, val_loader, test_loader, train_data, val_data, test_data, pos_weight, class_weights
+
+def evaluate_test_set_with_trainer(model: torch.nn.Module, test_loader: DataLoader, 
+                                  config: ClassificationConfig, output_dir: Path) -> dict:
+    """
+    Evaluate the test set using the trained model (implementing the missing functionality).
+    
+    Args:
+        model: Trained PyTorch model
+        test_loader: DataLoader for test set
+        config: Configuration object
+        output_dir: Directory to save results
+        
+    Returns:
+        Dictionary containing evaluation metrics
+    """
+    logger.info("Evaluating on test set...")
+    
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model.to(device)
+    model.eval()
+    
+    all_preds = []
+    all_labels = []
+    all_probs = []
+    
+    with torch.no_grad():
+        for inputs, labels, _ in test_loader:
+            inputs, labels = inputs.to(device), labels.to(device)
+            outputs = model(inputs)
+            
+            if config.classification_mode == "binary":
+                probs = torch.sigmoid(outputs)
+                preds = (probs > 0.5).long()
+                all_probs.extend(probs.cpu().numpy().flatten())
+            else:  # ternary
+                probs = torch.softmax(outputs, dim=1)
+                preds = torch.argmax(probs, dim=1)
+                all_probs.extend(probs.cpu().numpy())
+            
+            all_preds.extend(preds.cpu().numpy().flatten() if config.classification_mode == "binary" 
+                           else preds.cpu().numpy())
+            all_labels.extend(labels.cpu().numpy().flatten() if config.classification_mode == "binary" 
+                            else labels.cpu().numpy())
+    
+    # Calculate metrics
+    accuracy = accuracy_score(all_labels, all_preds)
+    
+    if config.classification_mode == "binary":
+        precision = precision_score(all_labels, all_preds, zero_division=0)
+        recall = recall_score(all_labels, all_preds, zero_division=0)
+        f1 = f1_score(all_labels, all_preds, zero_division=0)
+        auc = roc_auc_score(all_labels, all_probs) if len(np.unique(all_labels)) > 1 else 0.0
+        
+        metrics = {
+            'accuracy': accuracy,
+            'precision': precision,
+            'recall': recall,
+            'f1_score': f1,
+            'auc': auc
+        }
+        
+        logger.info(f"Test Set Results:")
+        logger.info(f"  Accuracy: {accuracy:.4f}")
+        logger.info(f"  Precision: {precision:.4f}")
+        logger.info(f"  Recall: {recall:.4f}")
+        logger.info(f"  F1 Score: {f1:.4f}")
+        logger.info(f"  AUC: {auc:.4f}")
+        
+    else:  # ternary
+        precision_macro = precision_score(all_labels, all_preds, average='macro', zero_division=0)
+        recall_macro = recall_score(all_labels, all_preds, average='macro', zero_division=0)
+        f1_macro = f1_score(all_labels, all_preds, average='macro', zero_division=0)
+        
+        precision_weighted = precision_score(all_labels, all_preds, average='weighted', zero_division=0)
+        recall_weighted = recall_score(all_labels, all_preds, average='weighted', zero_division=0)
+        f1_weighted = f1_score(all_labels, all_preds, average='weighted', zero_division=0)
+        
+        metrics = {
+            'accuracy': accuracy,
+            'precision_macro': precision_macro,
+            'recall_macro': recall_macro,
+            'f1_macro': f1_macro,
+            'precision_weighted': precision_weighted,
+            'recall_weighted': recall_weighted,
+            'f1_weighted': f1_weighted
+        }
+        
+        logger.info(f"Test Set Results:")
+        logger.info(f"  Accuracy: {accuracy:.4f}")
+        logger.info(f"  Precision (Macro): {precision_macro:.4f}")
+        logger.info(f"  Recall (Macro): {recall_macro:.4f}")
+        logger.info(f"  F1 Score (Macro): {f1_macro:.4f}")
+        logger.info(f"  Precision (Weighted): {precision_weighted:.4f}")
+        logger.info(f"  Recall (Weighted): {recall_weighted:.4f}")
+        logger.info(f"  F1 Score (Weighted): {f1_weighted:.4f}")
+    
+    return metrics
+
+def plot_confusion_matrix_standalone(model: torch.nn.Module, test_loader: DataLoader, 
+                                   config: ClassificationConfig, save_path: Path) -> None:
+    """
+    Plot confusion matrix for test set predictions.
+    
+    Args:
+        model: Trained PyTorch model
+        test_loader: DataLoader for test set
+        config: Configuration object
+        save_path: Path to save the confusion matrix plot
+    """
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model.to(device)
+    model.eval()
+    
+    all_preds = []
+    all_labels = []
+    
+    with torch.no_grad():
+        for inputs, labels, _ in test_loader:
+            inputs, labels = inputs.to(device), labels.to(device)
+            outputs = model(inputs)
+            
+            if config.classification_mode == "binary":
+                probs = torch.sigmoid(outputs)
+                preds = (probs > 0.5).long()
+            else:  # ternary
+                probs = torch.softmax(outputs, dim=1)
+                preds = torch.argmax(probs, dim=1)
+            
+            all_preds.extend(preds.cpu().numpy().flatten() if config.classification_mode == "binary" 
+                           else preds.cpu().numpy())
+            all_labels.extend(labels.cpu().numpy().flatten() if config.classification_mode == "binary" 
+                            else labels.cpu().numpy())
+    
+    # Create confusion matrix
+    cm = confusion_matrix(all_labels, all_preds)
+    
+    # Set up class names
+    if config.classification_mode == "binary":
+        class_names = ['Non-Cancerous', 'Cancerous']
+    else:
+        class_names = ['Non-Cancerous', 'Cancerous', 'False-Positive']
+    
+    # Plot
+    plt.figure(figsize=(8, 6))
+    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', 
+                xticklabels=class_names, yticklabels=class_names)
+    plt.title(f'Confusion Matrix - {config.classification_mode.title()} Classification')
+    plt.ylabel('True Label')
+    plt.xlabel('Predicted Label')
+    plt.tight_layout()
+    
+    # Save plot
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    plt.show()
+    
+    logger.info(f"Confusion matrix saved to {save_path}")
 
 def optimize_thresholds_and_update_config(model_path: Path, original_config: ClassificationConfig,
                                          test_loader: DataLoader, test_data: list,
@@ -318,6 +499,7 @@ def main():
     logger.info(f"Loss function: {config.loss_function}")
     
     # Set up output directory
+    if config.output_dir: args.output_dir = config.output_dir
     output_dir = Path(args.output_dir) / config.classification_mode
     output_dir.mkdir(parents=True, exist_ok=True)
     
@@ -398,18 +580,13 @@ def main():
     if test_loader is not None:
         logger.info("Evaluating on test set with original thresholds...")
         
-        # Create trainer for evaluation (even if we skipped training)
-        trainer = ClassificationTrainer(
+        # Evaluate with original thresholds using our standalone function
+        test_metrics = evaluate_test_set_with_trainer(
             model=model,
-            train_loader=train_loader,
-            val_loader=val_loader,
+            test_loader=test_loader,
             config=config,
-            pos_weight=pos_weight,
-            class_weights=class_weights
+            output_dir=output_dir
         )
-        
-        # Evaluate with original thresholds
-        test_metrics = trainer.evaluate_test_set(test_loader)
         
         # Save original test metrics
         original_test_metrics_path = output_dir / f"original_{config.classification_mode}_test_metrics.json"
@@ -419,7 +596,7 @@ def main():
         
         # Plot confusion matrix with original thresholds
         confusion_matrix_path = output_dir / f"original_{config.classification_mode}_confusion_matrix.png"
-        trainer.plot_confusion_matrix(test_loader, save_path=confusion_matrix_path)
+        plot_confusion_matrix_standalone(model, test_loader, config, confusion_matrix_path)
         
         # Print original evaluation results
         print("\n" + "="*60)

@@ -14,6 +14,8 @@ class ClassificationConfig:
     output_dir: str = "results/cell_classification" # Output directory
     data_dir: str = "data/classified_cells" # Directory containing individual cell images (output from segmentation)
     labels_csv: str = "data/classified_cells/labels.csv" # Path to CSV with labels (e.g., filename, label)
+    img_dir: str = "data/cells" # Path to the cells to be classified in inference
+    model_path: str = "models/classification.pth" # Path to the classification model to be used
 
     # Image preprocessing
     image_size: int = 96 # Target size (e.g., 96x96) after padding and resizing
@@ -58,6 +60,7 @@ class ClassificationConfig:
 
     def __post_init__(self):
         """Validate configuration after initialization."""
+        print(type)
         if abs(self.train_split + self.val_split + self.test_split - 1.0) > 1e-6:
             raise ValueError("Train, validation, and test splits must sum to 1.0")
         

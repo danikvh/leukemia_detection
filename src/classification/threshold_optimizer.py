@@ -87,7 +87,6 @@ class ThresholdOptimizer:
         
         if self.config.classification_mode == "binary":
             # For binary: convert to probabilities
-            import torch
             probabilities = torch.sigmoid(torch.tensor(all_outputs)).numpy().flatten()
             return {
                 'probabilities': probabilities,
@@ -95,7 +94,6 @@ class ThresholdOptimizer:
             }
         else:
             # For ternary: convert to probabilities
-            import torch
             probabilities = torch.softmax(torch.tensor(all_outputs), dim=1).numpy()
             return {
                 'probabilities': probabilities,

@@ -4,7 +4,7 @@
 classification_mode: "binary"
 
 # Data paths
-output_dir: "../results/cell_classification"
+output_dir: "../results/cell_classification_onlytrain/resnet152"
 data_dir: "../data/lafe/processed/processed_annotations/cells"
 labels_csv: "../data/lafe/processed/processed_annotations/all_cell_labels.csv"
 
@@ -12,8 +12,8 @@ labels_csv: "../data/lafe/processed/processed_annotations/all_cell_labels.csv"
 image_size: 96
 
 # Training parameters
-batch_size: 32
-epochs: 100
+batch_size: 128
+epochs: 11
 learning_rate: 0.0001
 optimizer: "AdamW"
 loss_function: "auto"  # Will be set to BCEWithLogitsLoss automatically
@@ -27,20 +27,22 @@ num_workers: 4
 pin_memory: true
 
 # Model parameters
-model_name: "resnet18"
+model_name: "resnet152"
 pretrained: true
 
 # Early Stopping
-patience: 10
-early_stopping_metric: "val_f1"
+patience: 100
+# val_loss: cross-entropy can be dominated by majority class 
+# val_f1: threshold sensitivity
+early_stopping_metric: "val_loss"
 
 # Data splits
-train_split: 0.8
-val_split: 0.1
-test_split: 0.1
+train_split: 1.0
+val_split: 0.0
+test_split: 0.0
 random_seed: 42
 
 # Inference parameters
 confidence_threshold_high: 0.9
-confidence_threshold_low: 0.3
+confidence_threshold_low: 0.06
 uncertainty_threshold: 0.1
