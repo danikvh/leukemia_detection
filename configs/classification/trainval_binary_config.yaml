@@ -4,7 +4,7 @@
 classification_mode: "binary"
 
 # Data paths
-output_dir: "../results/cell_classification_trainval/resnet152"
+output_dir: "../results/cell_classification_trainval/resnet18"
 data_dir: "../data/lafe/processed/processed_annotations/cells"
 labels_csv: "../data/lafe/processed/processed_annotations/all_cell_labels.csv"
 
@@ -27,7 +27,7 @@ num_workers: 4
 pin_memory: true
 
 # Model parameters
-model_name: "resnet152"
+model_name: "resnet18"
 pretrained: true
 
 # Early Stopping
@@ -44,5 +44,5 @@ random_seed: 42
 
 # Inference parameters
 confidence_threshold_high: 0.9
-confidence_threshold_low: 0.3
+confidence_threshold_low: 0.1
 uncertainty_threshold: 0.1

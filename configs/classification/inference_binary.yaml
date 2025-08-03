@@ -4,12 +4,12 @@
 classification_mode: "binary"
 
 # Paths
-output_dir: "../results/cell_inference/resnet152/bbox0.43"
+output_dir: "../results/cell_inference/resnet18/bbox0.43"
 img_dir: "../results/patch_extraction/bbox0.43/image_0_22B18243 CD34/cells"
-model_path: "../results/cell_classification_onlytrain/resnet152/binary/best_binary_classification_model.pth"
-model_name: "resnet152"
+model_path: "../results/cell_classification_onlytrain/resnet18/binary/best_binary_classification_model.pth"
+model_name: "resnet18"
 
 # Inference parameters
 confidence_threshold_high: 0.9
-confidence_threshold_low: 0.08
+confidence_threshold_low: 0.1
 uncertainty_threshold: 0.1
