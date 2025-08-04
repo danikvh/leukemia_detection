@@ -15,8 +15,12 @@ logger = logging.getLogger(__name__)
 class VisualizationGenerator:
     """Generate visualizations for cell classification analysis results."""
     
-    def __init__(self, classification_mode: str):
+    def __init__(self, classification_mode: str, uncertainty_threshold, confidence_threshold_high,
+                 confidence_threshold_low):
         self.classification_mode = classification_mode
+        self.uncertainty_threshold = uncertainty_threshold
+        self.confidence_threshold_high = confidence_threshold_high
+        self.confidence_threshold_low = confidence_threshold_low
         
     def create_enhanced_visualizations(self, analysis_results: Dict, output_dir: Path) -> None:
         """Create enhanced visualization plots including relative analysis and probability densities."""
@@ -225,15 +229,11 @@ class VisualizationGenerator:
                     color='gray', linewidth=2, linestyle='--')
         
         # Add threshold lines if thresholds are available
-        try:
-            ax7.axvline(x=self.classifier.confidence_threshold_low, color='green', linestyle='--', 
-                       alpha=0.7, label=f'Low Threshold ({self.classifier.confidence_threshold_low:.2f})')
-            ax7.axvline(x=self.classifier.confidence_threshold_high, color='red', linestyle='--', 
-                       alpha=0.7, label=f'High Threshold ({self.classifier.confidence_threshold_high:.2f})')
-        except AttributeError:
-            # Use default thresholds if not available
-            ax7.axvline(x=0.3, color='green', linestyle='--', alpha=0.7, label='Low Threshold (0.3)')
-            ax7.axvline(x=0.7, color='red', linestyle='--', alpha=0.7, label='High Threshold (0.7)')
+        ax7.axvline(x=self.confidence_threshold_low, color='green', linestyle='--', 
+                    alpha=0.7, label=f'Low Threshold ({self.confidence_threshold_low:.2f})')
+        ax7.axvline(x=self.confidence_threshold_high, color='red', linestyle='--', 
+                    alpha=0.7, label=f'High Threshold ({self.confidence_threshold_high:.2f})')
+
         
         ax7.axvline(x=0.5, color='black', linestyle=':', alpha=0.5, label='0.5 Threshold')
         
@@ -254,15 +254,11 @@ class VisualizationGenerator:
             if non_cancerous_stats.get('count', 0) > 0:
                 ax8.plot(x, y_non_canc, label=f'Non-Cancerous (decided)', color='blue', linewidth=2)
             
-            try:
-                ax8.axvline(x=self.classifier.confidence_threshold_low, color='green', linestyle='--', 
-                           alpha=0.7, label=f'Low Threshold ({self.classifier.confidence_threshold_low:.2f})')
-                ax8.axvline(x=self.classifier.confidence_threshold_high, color='red', linestyle='--', 
-                           alpha=0.7, label=f'High Threshold ({self.classifier.confidence_threshold_high:.2f})')
-            except AttributeError:
-                ax8.axvline(x=0.3, color='green', linestyle='--', alpha=0.7, label='Low Threshold (0.3)')
-                ax8.axvline(x=0.7, color='red', linestyle='--', alpha=0.7, label='High Threshold (0.7)')
-            
+            ax8.axvline(x=self.confidence_threshold_low, color='green', linestyle='--', 
+                        alpha=0.7, label=f'Low Threshold ({self.confidence_threshold_low:.2f})')
+            ax8.axvline(x=self.confidence_threshold_high, color='red', linestyle='--', 
+                        alpha=0.7, label=f'High Threshold ({self.confidence_threshold_high:.2f})')
+           
             rel_canc_pct = decided_stats.get('relative_cancerous_percentage', 0)
             rel_non_canc_pct = decided_stats.get('relative_non_cancerous_percentage', 0)
             
@@ -342,8 +338,8 @@ class VisualizationGenerator:
         
         # Add threshold line
         try:
-            ax7.axvline(x=self.classifier.uncertainty_threshold, color='red', linestyle='--', 
-                       alpha=0.7, label=f'Uncertainty Threshold ({self.classifier.uncertainty_threshold:.2f})')
+            ax7.axvline(x=self.uncertainty_threshold, color='red', linestyle='--', 
+                       alpha=0.7, label=f'Uncertainty Threshold ({self.uncertainty_threshold:.2f})')
         except AttributeError:
             ax7.axvline(x=0.5, color='red', linestyle='--', alpha=0.7, label='Uncertainty Threshold (0.5)')
         

@@ -576,7 +576,10 @@ class CellAnalyzer:
         
         try:
             from classification.visualization import VisualizationGenerator
-            viz_gen = VisualizationGenerator(self.config.classification_mode)
+            viz_gen = VisualizationGenerator(self.config.classification_mode, 
+                                             self.config.uncertainty_threshold,
+                                             self.config.confidence_threshold_high,
+                                             self.config.confidence_threshold_low)
             viz_gen.create_enhanced_visualizations(analysis_results, output_path.parent)
         except ImportError:
             logger.warning("Visualization module not available")
