@@ -1,19 +1,22 @@
 """
-Launch script for memory-efficient cell inference on unlabeled image folders.
-Processes images in small batches to avoid CUDA out of memory errors.
+Multi-folder cell inference script for processing multiple cell image directories.
+Processes each folder separately and creates both individual and combined results.
 
 Usage:
-    python run_cell_inference.py --config configs/binary_config.yaml --image-dir path/to/images/
-    python run_cell_inference.py --config configs/ternary_config.yaml --image-dir path/to/images/ --batch-size 8
+    python run_multi_folder_inference.py --config configs/binary_config.yaml --img-dir ../results/patch_extraction/bbox0.43/
+    python run_multi_folder_inference.py --config configs/ternary_config.yaml --img-dir ../results/patch_extraction/bbox0.43/ --batch-size 8
 """
 
 import argparse
 import logging
 from pathlib import Path
 import torch
+import json
+from typing import Dict, List, Any
+from collections import defaultdict
 
 from classification.config import ClassificationConfig
-from classification.memory_efficient import CellClassifier
+from classification.inference import CellClassifier
 from classification.analysis import CellAnalyzer
 
 # Set up logging
@@ -33,17 +36,18 @@ def setup_logging(verbose: bool = False):
         force=True
     )
 
-
-def validate_arguments(args):
-    """Validate command line arguments."""
-    if not Path(args.config).exists():
-        raise FileNotFoundError(f"Configuration file not found: {args.config}")
+def find_cell_folders(base_dir: Path) -> List[Path]:
+    """Find all cell folders in the base directory."""
+    cell_folders = []
     
-    if args.batch_size < 1:
-        raise ValueError("Batch size must be at least 1")
+    # Look for folders with pattern: image_*/cells
+    for item in base_dir.iterdir():
+        if item.is_dir() and item.name.startswith('image_'):
+            cells_dir = item / 'cells'
+            if cells_dir.exists() and cells_dir.is_dir():
+                cell_folders.append(cells_dir)
     
-    if args.batch_size > 32:
-        logger.warning(f"Large batch size ({args.batch_size}) may cause memory issues. Consider using smaller batches.")
+    return sorted(cell_folders)
 
 
 def setup_gpu_environment(args):
@@ -86,144 +90,360 @@ def load_classifier(config: ClassificationConfig) -> CellClassifier:
         raise
 
 
-def run_analysis(classifier: CellClassifier, config: ClassificationConfig, args) -> dict:
-    """Run the main analysis."""
+def process_single_folder(classifier: CellClassifier, 
+                         cell_folder: Path, 
+                         config: ClassificationConfig, 
+                         args) -> Dict[str, Any]:
+    """Process a single cell folder."""
+    folder_name = cell_folder.parent.name  # e.g., 'image_0_44G5D'
+    logger.info(f"\n{'='*60}")
+    logger.info(f"Processing folder: {folder_name}")
+    logger.info(f"Cell images directory: {cell_folder}")
+    logger.info(f"{'='*60}")
+    
     analyzer = CellAnalyzer(classifier)
     
-    logger.info(f"Starting memory-efficient analysis of images in {config.img_dir}")
-    logger.info(f"Using batch size: {args.batch_size}")
-    
+    # Run analysis on this specific folder
     results = analyzer.analyze_image_folder(
-        image_dir=Path(config.img_dir),
+        image_dir=cell_folder,
         extensions=args.extensions,
         batch_size=args.batch_size,
         save_individual_results=args.save_individual_results
     )
     
     if not results or 'error' in results:
-        raise RuntimeError(f"Analysis failed: {results.get('error', 'Unknown error')}")
+        logger.error(f"Analysis failed for {folder_name}: {results.get('error', 'Unknown error')}")
+        return {
+            'folder_name': folder_name,
+            'folder_path': str(cell_folder),
+            'status': 'failed',
+            'error': results.get('error', 'Unknown error'),
+            'results': None
+        }
     
-    # Save results
-    # Determine output directory
+    # Add folder metadata to results
+    results['folder_metadata'] = {
+        'folder_name': folder_name,
+        'folder_path': str(cell_folder),
+        'parent_directory': str(cell_folder.parent)
+    }
+    
+    # Create output directory for this folder
     if config.output_dir:
-        output_dir = Path(config.output_dir)
+        folder_output_dir = Path(config.output_dir) / folder_name
     else:
-        output_dir = Path(config.img_dir).parent / "analysis_results"
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    main_results_path = output_dir / "enhanced_analysis_results.json"
-    analyzer.save_results(
-        results, 
-        main_results_path
-    )
-
-    return results, output_dir
-
-
-def print_summary(results: dict, config: ClassificationConfig, output_dir: Path):
-    """Print enhanced summary to console."""
-    print("\n" + "="*90)
-    print("ENHANCED CELL CLASSIFICATION ANALYSIS SUMMARY")
-    print("="*90)
+        folder_output_dir = cell_folder.parent.parent / "analysis_results" / folder_name
     
-    # Processing summary
-    if 'processing_metadata' in results:
-        proc_meta = results['processing_metadata']
-        print(f"Batch Size Used: {proc_meta.get('batch_size_used', 'N/A')}")
-        print(f"Images Found: {proc_meta.get('total_images_found', 'N/A')}")
-        print(f"Successfully Processed: {proc_meta.get('successfully_processed', 'N/A')}")
-        print(f"Processing Errors: {proc_meta.get('processing_errors', 'N/A')}")
-        print(f"Success Rate: {100 - proc_meta.get('error_rate', 0):.1f}%")
+    folder_output_dir.mkdir(parents=True, exist_ok=True)
     
-    basic_stats = results.get('basic_statistics', {})
-    insights = results.get('insights_and_recommendations', {})
+    # Save individual folder results
+    individual_results_path = folder_output_dir / f"{folder_name}_analysis_results.json"
+    analyzer.save_results(results, individual_results_path)
     
-    print(f"\nClassification Mode: {config.classification_mode}")
+    logger.info(f"✓ Completed analysis for {folder_name}")
+    logger.info(f"  Results saved to: {folder_output_dir}")
     
-    if basic_stats.get('prediction_counts'):
-        print("\nOVERALL PREDICTION DISTRIBUTION:")
-        print("-" * 50)
-        for pred, count in basic_stats['prediction_counts'].items():
-            percentage = basic_stats.get('prediction_percentages', {}).get(pred, 0)
-            print(f"{pred.capitalize()}: {count} ({percentage:.1f}%)")
+    return {
+        'folder_name': folder_name,
+        'folder_path': str(cell_folder),
+        'output_path': str(folder_output_dir),
+        'status': 'success',
+        'results': results
+    }
+
+
+def create_combined_summary(all_results: List[Dict], output_dir: Path, config: ClassificationConfig):
+    """Create a combined summary of all folder analyses."""
+    logger.info("\n" + "="*80)
+    logger.info("CREATING COMBINED SUMMARY")
+    logger.info("="*80)
+    
+    # Separate successful and failed results
+    successful_results = [r for r in all_results if r['status'] == 'success']
+    failed_results = [r for r in all_results if r['status'] == 'failed']
+    
+    # Initialize combined statistics
+    combined_stats = {
+        'total_folders_processed': len(all_results),
+        'successful_folders': len(successful_results),
+        'failed_folders': len(failed_results),
+        'success_rate': (len(successful_results) / len(all_results) * 100) if all_results else 0,
+        'folder_summaries': {},
+        'aggregate_statistics': {
+            'total_images_across_all_folders': 0,
+            'total_decided_predictions': 0,
+            'total_uncertain_predictions': 0,
+            'combined_prediction_counts': defaultdict(int),
+            'combined_prediction_percentages': {},
+            'combined_relative_percentages': defaultdict(int),
+            'folder_performance_summary': []
+        }
+    }
+    
+    # Process successful results
+    total_images_all_folders = 0
+    total_decided_all_folders = 0
+    combined_prediction_counts = defaultdict(int)
+    
+    for result in successful_results:
+        folder_name = result['folder_name']
+        analysis = result['results']
+        basic_stats = analysis.get('basic_statistics', {})
         
-        # Show relative distribution excluding uncertain
-        print(f"\nRELATIVE DISTRIBUTION (EXCLUDING UNCERTAIN):")
-        print("-" * 50)
-        decided_count = basic_stats.get('decided_predictions_count', 0)
-        decided_pct = basic_stats.get('decided_predictions_percentage', 0)
-        print(f"Total Decided Predictions: {decided_count} ({decided_pct:.1f}% of all)")
+        # Extract key metrics for this folder
+        folder_images = basic_stats.get('total_images_analyzed', 0)
+        folder_decided = basic_stats.get('decided_predictions_count', 0)
+        folder_uncertain = basic_stats.get('prediction_counts', {}).get('uncertain', 0)
+        folder_predictions = basic_stats.get('prediction_counts', {})
         
-        for pred, percentage in basic_stats.get('relative_percentages_excluding_uncertain', {}).items():
-            count = basic_stats.get('decided_prediction_counts', {}).get(pred, 0)
-            print(f"{pred.capitalize()}: {count} ({percentage:.1f}% of decided)")
-    
-    if insights.get('summary'):
-        summary = insights['summary']
-        print(f"\nPRIMARY FINDING:")
-        print(f"{summary.get('primary_finding', 'N/A')}")
+        # Add to totals
+        total_images_all_folders += folder_images
+        total_decided_all_folders += folder_decided
         
-        print(f"\nCONFIDENCE ASSESSMENT:")
-        print(f"{summary.get('confidence_assessment', 'N/A')}")
+        # Combine prediction counts
+        for pred, count in folder_predictions.items():
+            combined_prediction_counts[pred] += count
         
-        print(f"\nUNCERTAINTY LEVEL: {summary.get('uncertainty_level', 0):.1f}%")
-        print(f"DECIDED PREDICTIONS: {summary.get('decided_percentage', 0):.1f}%")
+        # Store folder summary
+        insights = analysis.get('insights_and_recommendations', {}).get('summary', {})
+        combined_stats['folder_summaries'][folder_name] = {
+            'total_images': folder_images,
+            'decided_predictions': folder_decided,
+            'uncertain_predictions': folder_uncertain,
+            'decided_percentage': basic_stats.get('decided_predictions_percentage', 0),
+            'primary_finding': insights.get('primary_finding', 'N/A'),
+            'confidence_assessment': insights.get('confidence_assessment', 'N/A'),
+            'prediction_counts': dict(folder_predictions),
+            'relative_percentages': basic_stats.get('relative_percentages_excluding_uncertain', {})
+        }
         
-        # Show relative findings among decided predictions
-        if 'relative_findings_among_decided' in summary:
-            print(f"\nRELATIVE FINDINGS AMONG DECIDED PREDICTIONS:")
-            print("-" * 50)
-            rel_findings = summary['relative_findings_among_decided']
-            for key, value in rel_findings.items():
-                print(f"{key.replace('_', ' ').title()}: {value:.1f}%")
+        # Add to performance summary
+        combined_stats['aggregate_statistics']['folder_performance_summary'].append({
+            'folder_name': folder_name,
+            'images_processed': folder_images,
+            'success_rate': basic_stats.get('success_rate', 0),
+            'decided_percentage': basic_stats.get('decided_predictions_percentage', 0),
+            'primary_finding_short': insights.get('primary_finding', 'N/A')[:50] + '...' if len(insights.get('primary_finding', '')) > 50 else insights.get('primary_finding', 'N/A')
+        })
     
-    if insights.get('recommendations'):
-        print(f"\nRECOMMENDATIONS:")
-        print("-" * 50)
-        for i, rec in enumerate(insights['recommendations'], 1):
-            print(f"{i}. {rec}")
+    # Calculate combined statistics
+    combined_stats['aggregate_statistics']['total_images_across_all_folders'] = total_images_all_folders
+    combined_stats['aggregate_statistics']['total_decided_predictions'] = total_decided_all_folders
+    combined_stats['aggregate_statistics']['total_uncertain_predictions'] = combined_prediction_counts.get('uncertain', 0)
+    combined_stats['aggregate_statistics']['combined_prediction_counts'] = dict(combined_prediction_counts)
     
-    print(f"\nOUTPUT FILES:")
-    print("-" * 50)
-    print(f"Detailed results: {output_dir / 'enhanced_analysis_results.json'}")
-    print(f"Summary report: {output_dir / 'analysis_summary_report.txt'}")
+    # Calculate combined percentages
+    if total_images_all_folders > 0:
+        combined_stats['aggregate_statistics']['combined_prediction_percentages'] = {
+            pred: count / total_images_all_folders * 100 
+            for pred, count in combined_prediction_counts.items()
+        }
     
-    # Print key insights
-    print_key_insights(basic_stats, config)
+    # Calculate relative percentages (excluding uncertain)
+    if total_decided_all_folders > 0:
+        decided_prediction_counts = {k: v for k, v in combined_prediction_counts.items() if k != 'uncertain'}
+        combined_stats['aggregate_statistics']['combined_relative_percentages'] = {
+            pred: count / total_decided_all_folders * 100 
+            for pred, count in decided_prediction_counts.items()
+        }
+    
+    # Add failed folders info
+    if failed_results:
+        combined_stats['failed_folders_details'] = [
+            {
+                'folder_name': r['folder_name'],
+                'error': r.get('error', 'Unknown error')
+            }
+            for r in failed_results
+        ]
+    
+    # Save combined results
+    combined_results_path = output_dir / "combined_analysis_results.json"
+    with open(combined_results_path, 'w') as f:
+        json.dump(combined_stats, f, indent=4, default=str)
+    
+    # Create comprehensive text summary
+    create_text_summary(combined_stats, output_dir, config)
+    
+    logger.info(f"Combined analysis results saved to: {combined_results_path}")
 
 
-def print_key_insights(basic_stats: dict, config: ClassificationConfig):
-    """Print key insights summary."""
-    print(f"\nKEY INSIGHTS:")
-    print("-" * 50)
+def create_text_summary(combined_stats: Dict, output_dir: Path, config: ClassificationConfig):
+    """Create a comprehensive text summary."""
+    summary_path = output_dir / "COMBINED_SUMMARY_REPORT.txt"
     
-    if basic_stats.get('decided_predictions_count', 0) > 0:
-        decided_pct = basic_stats.get('decided_predictions_percentage', 0)
-        print(f"• {decided_pct:.1f}% of images resulted in confident predictions")
+    with open(summary_path, 'w') as f:
+        f.write("="*100 + "\n")
+        f.write("MULTI-FOLDER CELL CLASSIFICATION ANALYSIS - COMBINED SUMMARY REPORT\n")
+        f.write("="*100 + "\n\n")
+        
+        # Overall processing summary
+        f.write("PROCESSING OVERVIEW:\n")
+        f.write("-" * 50 + "\n")
+        f.write(f"Classification Mode: {config.classification_mode.upper()}\n")
+        f.write(f"Total Folders Found: {combined_stats['total_folders_processed']}\n")
+        f.write(f"Successfully Processed: {combined_stats['successful_folders']}\n")
+        f.write(f"Failed to Process: {combined_stats['failed_folders']}\n")
+        f.write(f"Overall Success Rate: {combined_stats['success_rate']:.1f}%\n\n")
+        
+        # Aggregate statistics
+        agg_stats = combined_stats['aggregate_statistics']
+        f.write("AGGREGATE STATISTICS ACROSS ALL FOLDERS:\n")
+        f.write("-" * 60 + "\n")
+        f.write(f"Total Images Processed: {agg_stats['total_images_across_all_folders']}\n")
+        f.write(f"Total Decided Predictions: {agg_stats['total_decided_predictions']}\n")
+        f.write(f"Total Uncertain Predictions: {agg_stats['total_uncertain_predictions']}\n")
+        f.write(f"Overall Decided Rate: {(agg_stats['total_decided_predictions'] / agg_stats['total_images_across_all_folders'] * 100) if agg_stats['total_images_across_all_folders'] > 0 else 0:.1f}%\n\n")
+        
+        # Combined prediction distribution
+        f.write("COMBINED PREDICTION DISTRIBUTION (ALL FOLDERS):\n")
+        f.write("-" * 50 + "\n")
+        for pred, count in agg_stats['combined_prediction_counts'].items():
+            percentage = agg_stats['combined_prediction_percentages'].get(pred, 0)
+            f.write(f"{pred.capitalize()}: {count} ({percentage:.1f}%)\n")
+        f.write("\n")
+        
+        # Relative distribution excluding uncertain
+        if agg_stats['combined_relative_percentages']:
+            f.write("RELATIVE DISTRIBUTION (EXCLUDING UNCERTAIN - ALL FOLDERS):\n")
+            f.write("-" * 60 + "\n")
+            f.write(f"Total Decided Across All Folders: {agg_stats['total_decided_predictions']} "
+                   f"({(agg_stats['total_decided_predictions'] / agg_stats['total_images_across_all_folders'] * 100) if agg_stats['total_images_across_all_folders'] > 0 else 0:.1f}% of all images)\n")
+            
+            for pred, percentage in agg_stats['combined_relative_percentages'].items():
+                count = agg_stats['combined_prediction_counts'].get(pred, 0)
+                f.write(f"{pred.capitalize()}: {count} ({percentage:.1f}% of decided)\n")
+            f.write("\n")
+        
+        # Individual folder performance
+        f.write("INDIVIDUAL FOLDER PERFORMANCE:\n")
+        f.write("-" * 50 + "\n")
+        f.write(f"{'Folder Name':<20} {'Images':<8} {'Decided%':<9} {'Success%':<9} {'Primary Finding':<40}\n")
+        f.write("-" * 90 + "\n")
+        
+        for folder_perf in agg_stats['folder_performance_summary']:
+            f.write(f"{folder_perf['folder_name']:<20} "
+                   f"{folder_perf['images_processed']:<8} "
+                   f"{folder_perf['decided_percentage']:<9.1f} "
+                   f"{folder_perf['success_rate']:<9.1f} "
+                   f"{folder_perf['primary_finding_short']:<40}\n")
+        f.write("\n")
+        
+        # Detailed folder summaries
+        f.write("DETAILED FOLDER ANALYSIS:\n")
+        f.write("=" * 50 + "\n\n")
+        
+        for folder_name, summary in combined_stats['folder_summaries'].items():
+            f.write(f"FOLDER: {folder_name}\n")
+            f.write("-" * 30 + "\n")
+            f.write(f"Total Images: {summary['total_images']}\n")
+            f.write(f"Decided Predictions: {summary['decided_predictions']} ({summary['decided_percentage']:.1f}%)\n")
+            f.write(f"Uncertain Predictions: {summary['uncertain_predictions']}\n")
+            
+            f.write(f"\nPrediction Distribution:\n")
+            for pred, count in summary['prediction_counts'].items():
+                pct = (count / summary['total_images'] * 100) if summary['total_images'] > 0 else 0
+                f.write(f"  {pred.capitalize()}: {count} ({pct:.1f}%)\n")
+            
+            if summary['relative_percentages']:
+                f.write(f"\nRelative Distribution (Decided Only):\n")
+                for pred, pct in summary['relative_percentages'].items():
+                    count = summary['prediction_counts'].get(pred, 0)
+                    f.write(f"  {pred.capitalize()}: {count} ({pct:.1f}% of decided)\n")
+            
+            f.write(f"\nPrimary Finding: {summary['primary_finding']}\n")
+            f.write(f"Confidence Assessment: {summary['confidence_assessment']}\n")
+            f.write("\n" + "="*50 + "\n\n")
+        
+        # Failed folders
+        if combined_stats.get('failed_folders_details'):
+            f.write("FAILED FOLDERS:\n")
+            f.write("-" * 20 + "\n")
+            for failed in combined_stats['failed_folders_details']:
+                f.write(f"Folder: {failed['folder_name']}\n")
+                f.write(f"Error: {failed['error']}\n\n")
+        
+        # Key insights and recommendations
+        f.write("KEY INSIGHTS AND RECOMMENDATIONS:\n")
+        f.write("-" * 40 + "\n")
+        
+        # Generate insights based on combined data
+        total_images = agg_stats['total_images_across_all_folders']
+        decided_rate = (agg_stats['total_decided_predictions'] / total_images * 100) if total_images > 0 else 0
         
         if config.classification_mode == "binary":
-            rel_canc = basic_stats.get('relative_percentages_excluding_uncertain', {}).get('cancerous', 0)
-            if rel_canc > 50:
-                print(f"• Among confident predictions, {rel_canc:.1f}% are classified as cancerous")
-                print("• This suggests a high-risk sample population requiring clinical attention")
-            else:
-                print(f"• Among confident predictions, {100-rel_canc:.1f}% are classified as non-cancerous")
-                print("• This suggests a relatively low-risk sample population")
-        else:
-            rel_canc = basic_stats.get('relative_percentages_excluding_uncertain', {}).get('cancerous', 0)
-            rel_fp = basic_stats.get('relative_percentages_excluding_uncertain', {}).get('false-positive', 0)
-            print(f"• Among confident predictions:")
-            print(f"  - {rel_canc:.1f}% are true cancerous cells")
-            print(f"  - {rel_fp:.1f}% are false-positive detections")
+            canc_count = agg_stats['combined_prediction_counts'].get('cancerous', 0)
+            canc_pct = agg_stats['combined_prediction_percentages'].get('cancerous', 0)
+            rel_canc_pct = agg_stats['combined_relative_percentages'].get('cancerous', 0)
             
-            if rel_canc > 30:
-                print("• High prevalence of true cancerous cells detected")
-            elif rel_fp > 20:
-                print("• Significant false-positive rate may indicate segmentation issues")
+            f.write(f"• Overall Analysis: {canc_count} cancerous cells detected ({canc_pct:.1f}% of all images)\n")
+            f.write(f"• Among decided predictions: {rel_canc_pct:.1f}% are classified as cancerous\n")
+            f.write(f"• Decision confidence: {decided_rate:.1f}% of images resulted in confident predictions\n")
+            
+            if canc_pct > 25:
+                f.write(f"• HIGH PRIORITY: Significant cancer prevalence detected across folders\n")
+            elif decided_rate < 70:
+                f.write(f"• ATTENTION: Low decision confidence suggests need for manual review\n")
+            else:
+                f.write(f"• Overall results show manageable cancer prevalence with good confidence\n")
+        else:
+            canc_count = agg_stats['combined_prediction_counts'].get('cancerous', 0)
+            fp_count = agg_stats['combined_prediction_counts'].get('false-positive', 0)
+            canc_pct = agg_stats['combined_prediction_percentages'].get('cancerous', 0)
+            fp_pct = agg_stats['combined_prediction_percentages'].get('false-positive', 0)
+            
+            f.write(f"• True cancerous cells: {canc_count} ({canc_pct:.1f}% of all images)\n")
+            f.write(f"• False-positive detections: {fp_count} ({fp_pct:.1f}% of all images)\n")
+            f.write(f"• Decision confidence: {decided_rate:.1f}% of images resulted in confident predictions\n")
+            
+            if canc_pct > 20:
+                f.write(f"• HIGH PRIORITY: Significant true cancer prevalence detected\n")
+            if fp_pct > 15:
+                f.write(f"• ATTENTION: High false-positive rate may indicate segmentation issues\n")
+        
+        f.write(f"\n• Processing completed successfully for {combined_stats['success_rate']:.1f}% of folders\n")
+        f.write(f"• Total processing covered {total_images} cell images across {combined_stats['successful_folders']} folders\n")
     
-    uncertain_pct = basic_stats.get('prediction_percentages', {}).get('uncertain', 0)
-    if uncertain_pct > 25:
-        print(f"• High uncertainty ({uncertain_pct:.1f}%) suggests challenging samples or threshold optimization needed")
+    logger.info(f"Comprehensive text summary saved to: {summary_path}")
+
+
+def print_final_summary(all_results: List[Dict], config: ClassificationConfig):
+    """Print final summary to console."""
+    successful_results = [r for r in all_results if r['status'] == 'success']
+    failed_results = [r for r in all_results if r['status'] == 'failed']
+    
+    print("\n" + "="*100)
+    print("MULTI-FOLDER CELL CLASSIFICATION ANALYSIS - FINAL SUMMARY")
+    print("="*100)
+    
+    print(f"Classification Mode: {config.classification_mode.upper()}")
+    print(f"Total Folders Processed: {len(all_results)}")
+    print(f"Successful: {len(successful_results)}")
+    print(f"Failed: {len(failed_results)}")
+    print(f"Success Rate: {len(successful_results) / len(all_results) * 100:.1f}%")
+    
+    if successful_results:
+        total_images = sum(r['results']['basic_statistics']['total_images_analyzed'] 
+                          for r in successful_results)
+        total_decided = sum(r['results']['basic_statistics']['decided_predictions_count'] 
+                           for r in successful_results)
+        
+        print(f"\nAggregate Results:")
+        print(f"Total Images Analyzed: {total_images}")
+        print(f"Total Decided Predictions: {total_decided} ({total_decided/total_images*100:.1f}%)")
+        
+        print(f"\nSuccessful Folders:")
+        for result in successful_results:
+            folder_stats = result['results']['basic_statistics']
+            print(f"  {result['folder_name']}: {folder_stats['total_images_analyzed']} images, "
+                  f"{folder_stats['decided_predictions_percentage']:.1f}% decided")
+    
+    if failed_results:
+        print(f"\nFailed Folders:")
+        for result in failed_results:
+            print(f"  {result['folder_name']}: {result.get('error', 'Unknown error')}")
+    
+    print("\n" + "="*100)
 
 
 def print_memory_status():
@@ -239,27 +459,25 @@ def print_memory_status():
 
 
 def main():
-    """Main function."""
+    """Main function for multi-folder processing."""
     parser = argparse.ArgumentParser(
-        description="Memory-efficient analysis of unlabeled cell images",
+        description="Multi-folder memory-efficient analysis of cell images",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
     
     # Required arguments
     parser.add_argument("--config", type=str, required=True,
                        help="Path to configuration YAML file")
-    parser.add_argument("--image-dir", type=str,
-                       help="Directory containing images to analyze")
+    parser.add_argument("--img-dir", type=str, 
+                       help="Base directory containing image_* folders with cells subdirectories")
     
     # Optional arguments
     parser.add_argument("--output-dir", type=str,
-                       help="Directory to save analysis results (default: {image-dir}/../analysis_results)")
+                       help="Directory to save analysis results")
     parser.add_argument("--batch-size", type=int, default=2048,
                        help="Batch size for processing (reduce if getting OOM errors)")
     parser.add_argument("--save-individual-results", action="store_true",
                        help="Save detailed results for each individual image")
-    parser.add_argument("--no-visualizations", action="store_true",
-                       help="Skip creating visualization plots")
     parser.add_argument("--extensions", nargs="+", 
                        default=[".png", ".jpg", ".jpeg", ".tiff", ".tif", ".npy"],
                        help="Image file extensions to process")
@@ -274,36 +492,83 @@ def main():
     setup_logging(args.verbose)
     
     try:
-        # Validate arguments
-        validate_arguments(args)
-        
         # Setup GPU environment
         setup_gpu_environment(args)
         
         # Load configuration
         config = ClassificationConfig.from_yaml(args.config)
         
-        # Override config with command line arguments
-        if args.image_dir:
-            config.img_dir = args.image_dir
+        # Set output directory
+        if args.img_dir:
+            config.img_dir = args.img_dir
         if args.output_dir:
             config.output_dir = args.output_dir
         
+        # Create main output directory
+        main_output_dir = Path(config.output_dir)
+        main_output_dir.mkdir(parents=True, exist_ok=True)
+        
         logger.info(f"Loaded configuration: {config.classification_mode} mode")
+        logger.info(f"Base directory: {config.img_dir}")
+        logger.info(f"Output directory: {config.output_dir}")
+        
+        # Find all cell folders
+        base_dir = Path(config.img_dir)
+        cell_folders = find_cell_folders(base_dir)
+        
+        if not cell_folders:
+            logger.error(f"No cell folders found in {base_dir}")
+            logger.info("Looking for folders with pattern: image_*/cells")
+            return
+        
+        logger.info(f"Found {len(cell_folders)} cell folders to process:")
+        for folder in cell_folders:
+            logger.info(f"  - {folder.parent.name}/cells ({folder})")
         
         # Load classifier
         classifier = load_classifier(config)
         
-        # Run analysis
-        results, output_dir = run_analysis(classifier, config, args)
+        # Process each folder
+        all_results = []
         
-        # Print summary
-        print_summary(results, config, output_dir)
+        for i, cell_folder in enumerate(cell_folders, 1):
+            logger.info(f"\n{'#'*80}")
+            logger.info(f"PROCESSING FOLDER {i}/{len(cell_folders)}")
+            logger.info(f"{'#'*80}")
+            
+            try:
+                result = process_single_folder(classifier, cell_folder, config, args)
+                all_results.append(result)
+                
+                # Clear GPU memory between folders
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                
+            except Exception as e:
+                logger.error(f"Failed to process folder {cell_folder.parent.name}: {e}")
+                all_results.append({
+                    'folder_name': cell_folder.parent.name,
+                    'folder_path': str(cell_folder),
+                    'status': 'failed',
+                    'error': str(e),
+                    'results': None
+                })
+        
+        # Create combined summary
+        create_combined_summary(all_results, main_output_dir, config)
+        
+        # Print final summary
+        print_final_summary(all_results, config)
         
         # Print memory status
         print_memory_status()
         
-        logger.info("Analysis completed successfully")
+        logger.info("\n" + "="*80)
+        logger.info("MULTI-FOLDER ANALYSIS COMPLETED SUCCESSFULLY")
+        logger.info("="*80)
+        logger.info(f"Individual results saved in: {main_output_dir}")
+        logger.info(f"Combined summary: {main_output_dir}/COMBINED_SUMMARY_REPORT.txt")
+        logger.info(f"Combined data: {main_output_dir}/combined_analysis_results.json")
         
     except KeyboardInterrupt:
         logger.info("Analysis interrupted by user")
