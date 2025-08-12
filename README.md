@@ -23,44 +23,142 @@ This project implements state-of-the-art deep learning approaches for:
 
 ## 🚀 Features
 
-* **WSI Processing** : Extract patches from whole slide images with configurable parameters
+* **End-to-End WSI Processing**: A complete pipeline from raw Whole Slide Images (WSI) to training-ready datasets.
+* **Advanced Preprocessing** : Includes color deconvolution, pseudo-RGB channels creation, patch extraction, and quality filtering
 * **Annotation Handling** : Process QuPath annotations and GeoJSON files
 * **Cell Segmentation** : Segment individual cells using using deep learning models
 * **Cell Classification** : Classify cells as positive/negative for CD34 marker
 * **Data Pipeline** : Complete pipeline from raw WSI to training-ready datasets
-* **Advanced Preprocessing** : Color deconvolution, pseudo-RGB channels creation, patch extraction, and quality filtering
 * **Visualization** : Interactive visualization tools for annotations and predictions
-* Support for multiple staining types (H&E, IHC)
-* Comprehensive evaluation metrics (Deepcell and Coco)
-* Supports QuPath annotations and GeoJSON formats
+* **Evaluation**: Comprehensive evaluation metrics (Deepcell and Coco)
+* **Extensible and Configurable**: Leverages YAML configuration files for easy management of parameters and experiments
 
 ## 📁 Project Structure
 
+The project is organized into a modular structure to separate concerns and improve maintainability.
+
 ```
-leukemia-detection/
-├── src/                          # Core library code
-│   ├── classification/           # Classification models and training
-│   ├── segmentation/            # Segmentation models and training
-│   ├── data/                    # Data processing modules
-│   ├── common/                  # Shared constants and exceptions
-│   └── visualization/           # Plotting and visualization tools
-├── scripts/                     # Command-line utilities
-├── configs/                     # Configuration files
-├── notebooks/                   # Jupyter notebooks for analysis
-├── tests/                       # Unit and integration tests
-├── requirements.txt             # Python dependencies
-├── setup.py                     # Package installation script
-└── README.md                    # This file
+
+├── environment.yaml          # Conda environment specificationleukemia-detection/
+├── configs/                  # YAML configuration files for experiments
+│   ├── classification/
+│   ├── data/
+│   └── train/
+├── scripts/                  # Main executable scripts for the pipeline
+│   ├── data_processing.py
+│   ├── segmentation_training.py
+│   ├── cell_classification.py
+│   └── cell_inference.py
+├── src/                      # Core source code
+│   ├── common/               # Shared utilities and base configurations
+│   ├── data/                 # Data loading and processing modules
+│   ├── segmentation/         # Segmentation models, training, and evaluation
+│   └── classification/       # Classification models, training, and evaluation
+├── docs/                     # Documentation and images for the README
+├── notebooks/                # Jupyter notebooks for analysis and exploration
+├── tests/                    # Unit and integration tests
+├── environment.yaml          # Conda environment specification
+└── README.md                 # This file
 ```
 
 ## 🛠️ Installation
 
-### Quick Install (pip)
+**Prerequisites:** [Anaconda](https://www.anaconda.com/products/distribution) or [Miniconda](https://docs.conda.io/en/latest/miniconda.html) must be installed.
 
-The easiest way to get started is to install directly from GitHub:
+1. **Clone the repository:**
+
+   ```bash
+   git clone https://github.com/danikvh/leukemia-detection.git
+   cd leukemia-detection
+   ```
+2. **Create the Conda environment:**
+   This command will create a new environment named `leukemia-detection` (or as specified in the `environment.yaml` file) and install all required dependencies.
+
+   ```bash
+   conda env create -f environment.yaml
+   ```
+3. **Activate the environment:**
+
+   ```bash
+   conda activate leukemia-detection
+   ```
+
+## 🚀 Usage & Workflow
+
+The project provides a set of command-line scripts to execute the entire machine learning pipeline. The workflow is modular, allowing you to either prepare new training data or run a full inference pipeline on new images.
+
+The main script for data handling, `scripts/data_processing.py`, operates using different subcommands (`extract-annotations` and `extract-patches`) depending on the goal.
+
+### **Workflow 1: Preparing a Training Dataset (from Ground-Truth Labels)**
+
+This workflow is used when you have manually annotated WSI files (e.g., as `.geojson` files) and want to create a dataset to train your segmentation and classification models.
+
+**Goal:** `WSI + Annotations` → `Training-Ready Patches & Cells` → `Trained Models`
+
+#### **Step 1.A: Extract Patches and Cells from Annotations**
+
+Use the `extract-annotations` command to process WSI files and their corresponding GeoJSON annotations. This will generate labeled image patches and individual cell crops for training.
 
 ```bash
-pip install git+https://github.com/danikvh/leukemia-detection.git
+python scripts/data_processing.py extract-annotations \
+    --config configs/data/annotations_extraction.yaml \
+    --svs-dir /path/to/raw/wsi \
+    --geojson-dir /path/to/ground-truth/geojson \
+    --output-dir /path/to/training_dataset
+```
+
+#### **Step 1.B: Train the Segmentation Model**
+
+Use the patches and masks generated in the previous step to train the CellSAM segmentation model.
+
+```bash
+python scripts/segmentation_training.py \
+    --stage1_config configs/train/stage1.yaml \
+    --stage2_config configs/train/stage2.yaml \
+    --dataset_config configs/datasets/fe_ihc.yaml \
+    --output_dir outputs/segmentation_models
+```
+
+#### **Step 1.C: Train the Classification Model**
+
+Use the labeled cell crops from Step 1.A to train the classification model. The `--optimize-thresholds` flag is highly recommended to automatically find the best decision boundaries after training.
+
+```bash
+python scripts/cell_classification.py \
+    --config configs/classification/trainval_binary_config.yaml \
+    --output-dir outputs/classification_models \
+    --optimize-thresholds
+```
+
+### **Workflow 2: Full Inference on a New WSI (with a Trained Model)**
+
+This workflow is used when you have a new, unlabeled WSI and want to apply your trained models to perform a full analysis.
+
+**Goal:** `New WSI` → `Segmented Cells` → `Classification Results & Report`
+
+#### **Step 2.A: Segment WSI and Extract Cells**
+
+Use the `extract-patches` command with the `--generate-mask` flag. This leverages your trained segmentation model (`--model-path`) to perform inference on the WSI, identify all cells, and save them as individual image crops.
+
+```bash
+python scripts/data_processing.py extract-patches \
+    --config configs/data/patch_extraction.yaml \
+    --svs-dir /path/to/new/wsi \
+    --qupath-project /path/to/new/qupath_project_with_rois \
+    --output-dir /path/to/inference_output \
+    --generate-mask \
+    --model-path /path/to/your/trained_segmentation_model.pth
+```
+
+#### **Step 2.B: Run Classification Inference**
+
+Run the trained classification model on the folder of cell crops generated in the previous step. This script will classify each cell and create a comprehensive summary report for the entire WSI.
+
+```bash
+python scripts/cell_inference.py \
+    --config configs/classification/inference_binary.yaml \
+    --img-dir /path/to/inference_output  # Main folder containing extracted cells \
+    --output-dir outputs/final_reports
 ```
 
 ## 📊 Results
