@@ -12,7 +12,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 from tqdm import tqdm
-from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score, confusion_matrix
 
 from classification.inference import CellClassifier
 
@@ -766,18 +766,18 @@ class ModelEvaluator:
         
         # Plot 4: Confidence statistics
         stats_text = f"""Confidence Statistics:
-        
-Mean: {np.mean(all_confidences):.4f}
-Median: {np.median(all_confidences):.4f}
-Std: {np.std(all_confidences):.4f}
-Min: {np.min(all_confidences):.4f}
-Max: {np.max(all_confidences):.4f}
+                
+            Mean: {np.mean(all_confidences):.4f}
+            Median: {np.median(all_confidences):.4f}
+            Std: {np.std(all_confidences):.4f}
+            Min: {np.min(all_confidences):.4f}
+            Max: {np.max(all_confidences):.4f}
 
-Percentiles:
-25%: {np.percentile(all_confidences, 25):.4f}
-75%: {np.percentile(all_confidences, 75):.4f}
-90%: {np.percentile(all_confidences, 90):.4f}
-95%: {np.percentile(all_confidences, 95):.4f}"""
+            Percentiles:
+            25%: {np.percentile(all_confidences, 25):.4f}
+            75%: {np.percentile(all_confidences, 75):.4f}
+            90%: {np.percentile(all_confidences, 90):.4f}
+            95%: {np.percentile(all_confidences, 95):.4f}"""
         
         ax4.text(0.1, 0.9, stats_text, transform=ax4.transAxes, fontsize=10, 
                 verticalalignment='top', fontfamily='monospace')
@@ -787,6 +787,64 @@ Percentiles:
         plt.tight_layout()
         plt.savefig(output_dir / "ternary_confidence_analysis.png", dpi=300, bbox_inches='tight')
         plt.show()
+
+        
+    def plot_confusion_matrix_standalone(self, test_loader, save_path: Path) -> None:
+        """
+        Plot confusion matrix for test set predictions.
+        
+        Args:
+            model: Trained PyTorch model
+            test_loader: DataLoader for test set
+            config: Configuration object
+            save_path: Path to save the confusion matrix plot
+        """
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        
+        all_preds = []
+        all_labels = []
+        
+        with torch.no_grad():
+            for inputs, labels, _ in test_loader:
+                inputs, labels = inputs.to(device), labels.to(device)
+                outputs = self.classifier.model(inputs)
+                
+                if self.config.classification_mode == "binary":
+                    probs = torch.sigmoid(outputs)
+                    preds = (probs > 0.5).long()
+                else:  # ternary
+                    probs = torch.softmax(outputs, dim=1)
+                    preds = torch.argmax(probs, dim=1)
+                
+                all_preds.extend(preds.cpu().numpy().flatten() if self.config.classification_mode == "binary" 
+                            else preds.cpu().numpy())
+                all_labels.extend(labels.cpu().numpy().flatten() if self.config.classification_mode == "binary" 
+                                else labels.cpu().numpy())
+        
+        # Create confusion matrix
+        cm = confusion_matrix(all_labels, all_preds)
+        
+        # Set up class names
+        if self.config.classification_mode == "binary":
+            class_names = ['Non-Cancerous', 'Cancerous']
+        else:
+            class_names = ['Non-Cancerous', 'Cancerous', 'False-Positive']
+        
+        # Plot
+        plt.figure(figsize=(8, 6))
+        sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', 
+                    xticklabels=class_names, yticklabels=class_names)
+        plt.title(f'Confusion Matrix - {self.config.classification_mode.title()} Classification')
+        plt.ylabel('True Label')
+        plt.xlabel('Predicted Label')
+        plt.tight_layout()
+        
+        # Save plot
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        plt.show()
+        
+        logger.info(f"Confusion matrix saved to {save_path}")
     
     def _save_evaluation_results(self, results: Dict, output_dir: Path, mode: str):
         """Save evaluation results to JSON file."""
@@ -810,24 +868,3 @@ Percentiles:
             json.dump(serializable_results, f, indent=4, default=str)
         
         logger.info(f"Evaluation results saved to {output_file}")
-
-
-def evaluate_model_on_test_set(classifier: CellClassifier, test_loader, test_data: List[Tuple[Path, int]], 
-                              output_dir: Path, visualize: bool = True, 
-                              num_visualize_each: int = 5) -> Dict:
-    """
-    Convenience function to evaluate a model on a test set.
-    
-    Args:
-        classifier: CellClassifier instance
-        test_loader: DataLoader for test set
-        test_data: List of (image_path, label) tuples for the test set
-        output_dir: Directory to save outputs
-        visualize: Whether to create visualizations
-        num_visualize_each: Number of examples to visualize for each category
-        
-    Returns:
-        Dict containing comprehensive evaluation metrics and analysis
-    """
-    evaluator = ModelEvaluator(classifier)
-    return evaluator.evaluate_test_set(test_loader, test_data, output_dir, visualize, num_visualize_each)

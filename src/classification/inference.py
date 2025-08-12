@@ -1,15 +1,17 @@
 """
-Refactored inference module with core classification logic separated from evaluation and visualization.
+Consolidated cell classification inference module with memory-efficient batch processing.
 """
 
 import torch
 import torch.nn as nn
+import gc
 from pathlib import Path
 from typing import Union, Tuple, Dict, List, Optional
 from PIL import Image
 import numpy as np
 import logging
 import json
+from tqdm import tqdm
 
 from classification.models import get_classification_model
 from classification.transforms import get_classification_transforms
@@ -20,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 class CellClassifier:
     """
-    Core cell classification inference handler.
+    Cell classification inference handler with memory-efficient batch processing.
     Supports both binary and ternary classification modes.
     """
     
@@ -61,6 +63,10 @@ class CellClassifier:
         self.confidence_threshold_high = config.confidence_threshold_high
         self.confidence_threshold_low = config.confidence_threshold_low
         self.uncertainty_threshold = config.uncertainty_threshold
+        
+        # Clear any unnecessary memory after initialization
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
         
     def _preprocess_image(self, img_input: Union[str, Path, np.ndarray, Image.Image]) -> torch.Tensor:
         """Helper to load and preprocess a single image."""
@@ -183,12 +189,19 @@ class CellClassifier:
             }
         }
 
-    def classify_batch(self, img_inputs: List[Union[str, Path, np.ndarray, Image.Image]]) -> List[Dict[str, Union[str, float, List[float]]]]:
+    def classify_batch(
+        self, 
+        img_inputs: List[Union[str, Path, np.ndarray, Image.Image]], 
+        batch_size: int = 128,
+        memory_efficient: bool = True
+    ) -> List[Dict[str, Union[str, float, List[float]]]]:
         """
-        Classifies a batch of cell images.
+        Classifies a batch of cell images with optional memory-efficient processing.
         
         Args:
             img_inputs: List of image inputs.
+            batch_size: Maximum number of images to process simultaneously (only used if memory_efficient=True)
+            memory_efficient: Whether to use memory-efficient processing for large batches
                                                                            
         Returns:
             List of classification results for each image.
@@ -196,6 +209,14 @@ class CellClassifier:
         if not img_inputs:
             return []
 
+        # For small batches or when memory efficiency is disabled, use original batch processing
+        if not memory_efficient or len(img_inputs) <= batch_size:
+            return self._process_full_batch(img_inputs)
+        else:
+            return self._classify_batch_efficient(img_inputs, batch_size)
+
+    def _process_full_batch(self, img_inputs: List) -> List[Dict]:
+        """Process all images in a single batch (original method)."""
         processed_tensors = [self._preprocess_image(img).squeeze(0) for img in img_inputs]
         
         # Check if all tensors have same shape before stacking
@@ -213,6 +234,131 @@ class CellClassifier:
                 return self._process_binary_batch_output(outputs)
             else:
                 return self._process_ternary_batch_output(outputs)
+
+    def _classify_batch_efficient(self, img_inputs: List, batch_size: int) -> List[Dict]:
+        """
+        Memory-efficient batch classification that processes images in smaller sub-batches.
+        
+        Args:
+            img_inputs: List of image inputs (paths, arrays, or PIL images)
+            batch_size: Maximum number of images to process simultaneously
+            
+        Returns:
+            List of classification results
+        """
+        all_results = []
+        total_batches = (len(img_inputs) + batch_size - 1) // batch_size
+        
+        logger.info(f"Processing {len(img_inputs)} images in {total_batches} batches of size {batch_size}")
+        
+        # Process in small batches
+        for i in tqdm(range(0, len(img_inputs), batch_size), desc="Processing batches"):
+            batch_inputs = img_inputs[i:i + batch_size]
+            
+            try:
+                # Process current batch
+                batch_results = self._process_single_batch(batch_inputs)
+                all_results.extend(batch_results)
+                
+                # Clear GPU memory after each batch
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                
+                # Force garbage collection
+                gc.collect()
+                
+            except torch.cuda.OutOfMemoryError as e:
+                logger.error(f"CUDA OOM in batch {i//batch_size + 1}. Falling back to single image processing.")
+                # Fallback to processing images one by one for this batch
+                for img_input in batch_inputs:
+                    try:
+                        result = self.classify_single_image(img_input)
+                        all_results.append(result)
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
+                    except Exception as single_error:
+                        logger.error(f"Error processing single image: {single_error}")
+                        # Add a placeholder result for failed images
+                        all_results.append({
+                            "prediction": "error",
+                            "probability": 0.0,
+                            "confidence": 0.0,
+                            "error": str(single_error)
+                        })
+            except Exception as e:
+                logger.error(f"Error processing batch {i//batch_size + 1}: {e}")
+                # Add placeholder results for the entire failed batch
+                for _ in batch_inputs:
+                    all_results.append({
+                        "prediction": "error",
+                        "probability": 0.0,
+                        "confidence": 0.0,
+                        "error": str(e)
+                    })
+        
+        return all_results
+    
+    def _process_single_batch(self, batch_inputs: List) -> List[Dict]:
+        """Process a single batch of images efficiently."""
+        # Preprocess all images in the batch
+        try:
+            processed_tensors = []
+            valid_indices = []
+            
+            for idx, img_input in enumerate(batch_inputs):
+                try:
+                    tensor = self._preprocess_image(img_input).squeeze(0)  # Remove batch dim
+                    processed_tensors.append(tensor)
+                    valid_indices.append(idx)
+                except Exception as e:
+                    logger.warning(f"Failed to preprocess image {idx}: {e}")
+                    continue
+            
+            if not processed_tensors:
+                return [{"prediction": "error", "probability": 0.0, "confidence": 0.0, 
+                        "error": "No valid images in batch"} for _ in batch_inputs]
+            
+            # Check tensor shapes
+            if not all(t.shape == processed_tensors[0].shape for t in processed_tensors):
+                logger.warning("Images in batch have different shapes. Processing individually.")
+                results = []
+                for idx, img_input in enumerate(batch_inputs):
+                    try:
+                        result = self.classify_single_image(img_input)
+                        results.append(result)
+                    except Exception as e:
+                        results.append({"prediction": "error", "probability": 0.0, 
+                                      "confidence": 0.0, "error": str(e)})
+                return results
+            
+            # Stack tensors and process
+            batch_tensor = torch.stack(processed_tensors).to(self.device)
+            
+            with torch.no_grad():
+                outputs = self.model(batch_tensor)
+                
+                if self.config.classification_mode == "binary":
+                    batch_results = self._process_binary_batch_output(outputs)
+                else:
+                    batch_results = self._process_ternary_batch_output(outputs)
+            
+            # Map results back to original indices
+            final_results = []
+            result_idx = 0
+            for original_idx in range(len(batch_inputs)):
+                if original_idx in valid_indices:
+                    final_results.append(batch_results[result_idx])
+                    result_idx += 1
+                else:
+                    final_results.append({"prediction": "error", "probability": 0.0, 
+                                        "confidence": 0.0, "error": "Preprocessing failed"})
+            
+            return final_results
+            
+        except Exception as e:
+            logger.error(f"Error in _process_single_batch: {e}")
+            return [{"prediction": "error", "probability": 0.0, "confidence": 0.0, 
+                    "error": str(e)} for _ in batch_inputs]
 
     def _process_binary_batch_output(self, outputs: torch.Tensor) -> List[Dict[str, Union[str, float]]]:
         """Process batch outputs for binary classification."""

@@ -13,7 +13,7 @@ from pathlib import Path
 import torch
 
 from classification.config import ClassificationConfig
-from classification.memory_efficient import MemoryEfficientCellClassifier
+from classification.memory_efficient import CellClassifier
 from classification.analysis import CellAnalyzer
 
 # Set up logging
@@ -64,10 +64,10 @@ def setup_gpu_environment(args):
         logger.info("GPU not available, using CPU")
 
 
-def load_classifier(config: ClassificationConfig) -> MemoryEfficientCellClassifier:
+def load_classifier(config: ClassificationConfig) -> CellClassifier:
     """Load and initialize the classifier."""
     try:
-        classifier = MemoryEfficientCellClassifier(
+        classifier = CellClassifier(
             model_path=config.model_path,
             config=config
         )
@@ -86,7 +86,7 @@ def load_classifier(config: ClassificationConfig) -> MemoryEfficientCellClassifi
         raise
 
 
-def run_analysis(classifier: MemoryEfficientCellClassifier, config: ClassificationConfig, args) -> dict:
+def run_analysis(classifier: CellClassifier, config: ClassificationConfig, args) -> dict:
     """Run the main analysis."""
     analyzer = CellAnalyzer(classifier)
     

@@ -10,7 +10,7 @@ from collections import Counter
 import pandas as pd
 import numpy as np
 
-from classification.memory_efficient import MemoryEfficientCellClassifier
+from classification.memory_efficient import CellClassifier
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +20,7 @@ class CellAnalyzer:
     Analyzer that processes images in batches and generates comprehensive reports.
     """
     
-    def __init__(self, classifier: MemoryEfficientCellClassifier):
+    def __init__(self, classifier: CellClassifier):
         self.classifier = classifier
         if classifier:
             self.config = classifier.config

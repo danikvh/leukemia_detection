@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 """
 Integrated training pipeline that includes threshold optimization after training.
-This extends the original cell_classification.py to automatically optimize thresholds
-using the test set after training is complete.
 
 Usage:
-    python integrated_training_pipeline.py --config configs/classification/binary_config.yaml --optimize-thresholds
-    python integrated_training_pipeline.py --config configs/classification/ternary_config.yaml --optimize-thresholds
+    python cell_classification.py --config ../configs/classification/trainval_binary_config.yaml --optimize-thresholds
+    python cell_classification.py --config ../configs/classification/train_ternary_config.yaml --optimize-thresholds
 """
 
 import argparse
@@ -17,20 +15,17 @@ from torch.utils.data import DataLoader
 import json
 import pandas as pd
 import numpy as np
-from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score, confusion_matrix
 import matplotlib.pyplot as plt
 import seaborn as sns
 
 from classification.config import ClassificationConfig
-from classification.utils import (
-    load_classification_labels, get_image_paths_and_labels, split_data,
-    calculate_pos_weight, calculate_class_weights, visualize_class_distribution
-)
-from classification.datasets import CellClassificationDataset
+from classification.datasets import DataLoaderManager
+from classification.evaluation import ModelEvaluator
 from classification.models import get_classification_model
 from classification.trainer import ClassificationTrainer
 from classification.inference import CellClassifier
 from classification.threshold_optimizer import ThresholdOptimizer
+from classification.utils import load_classification_labels, get_image_paths_and_labels
 
 # Set up logging
 logging.basicConfig(
@@ -39,261 +34,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-def setup_data_loaders(config: ClassificationConfig) -> tuple:
-    """
-    Set up data loaders for training, validation, and testing.
-    """
-    # Load labels
-    label_map = load_classification_labels(
-        Path(config.labels_csv), 
-        classification_mode=config.classification_mode
-    )
-    
-    # Get image paths and labels
-    data_samples = get_image_paths_and_labels(
-        Path(config.data_dir), 
-        label_map
-    )
-    
-    # Visualize class distribution
-    visualize_class_distribution(
-        data_samples, 
-        classification_mode=config.classification_mode,
-        title=f"Overall Class Distribution ({config.classification_mode.title()} Mode)"
-    )
-    
-    # Check if we're in train-only mode
-    is_train_only = (config.train_split == 1.0 and 
-                     config.val_split == 0.0 and 
-                     config.test_split == 0.0)
-    
-    if is_train_only:
-        logger.info("TRAIN-ONLY MODE: Using all data for training (no validation or test sets)")
-        train_data = data_samples
-        val_data = []
-        test_data = []
-    else:
-        # Split data normally
-        train_data, val_data, test_data = split_data(
-            data_samples,
-            config.train_split,
-            config.val_split,
-            config.test_split,
-            config.random_seed
-        )
-    
-    logger.info(f"Data splits - Train: {len(train_data)}, Val: {len(val_data)}, Test: {len(test_data)}")
-    
-    # Calculate class weights
-    pos_weight = None
-    class_weights = None
-    
-    if config.use_class_weights:
-        if config.classification_mode == "binary":
-            pos_weight = calculate_pos_weight(train_data)
-        else:  # ternary
-            class_weights = calculate_class_weights(train_data, config.num_classes)
-    
-    # Create datasets
-    train_dataset = CellClassificationDataset(
-        train_data, config.image_size, config.normalize_mean, config.normalize_std,
-        classification_mode=config.classification_mode, is_train=True
-    )
-    
-    # Only create validation dataset if we have validation data
-    val_dataset = None
-    if val_data:
-        val_dataset = CellClassificationDataset(
-            val_data, config.image_size, config.normalize_mean, config.normalize_std,
-            classification_mode=config.classification_mode, is_train=False
-        )
-    
-    # Only create test dataset if we have test data
-    test_dataset = None
-    if test_data:
-        test_dataset = CellClassificationDataset(
-            test_data, config.image_size, config.normalize_mean, config.normalize_std,
-            classification_mode=config.classification_mode, is_train=False
-        )
-    
-    # Create data loaders
-    train_loader = DataLoader(
-        train_dataset, batch_size=config.batch_size, shuffle=True,
-        num_workers=config.num_workers, pin_memory=config.pin_memory
-    )
-    
-    val_loader = None
-    if val_dataset:
-        val_loader = DataLoader(
-            val_dataset, batch_size=config.batch_size, shuffle=False,
-            num_workers=config.num_workers, pin_memory=config.pin_memory
-        )
-    
-    test_loader = None
-    if test_dataset:
-        test_loader = DataLoader(
-            test_dataset, batch_size=config.batch_size, shuffle=False,
-            num_workers=config.num_workers, pin_memory=config.pin_memory
-        )
-    
-    return train_loader, val_loader, test_loader, train_data, val_data, test_data, pos_weight, class_weights
-
-def evaluate_test_set_with_trainer(model: torch.nn.Module, test_loader: DataLoader, 
-                                  config: ClassificationConfig, output_dir: Path) -> dict:
-    """
-    Evaluate the test set using the trained model (implementing the missing functionality).
-    
-    Args:
-        model: Trained PyTorch model
-        test_loader: DataLoader for test set
-        config: Configuration object
-        output_dir: Directory to save results
-        
-    Returns:
-        Dictionary containing evaluation metrics
-    """
-    logger.info("Evaluating on test set...")
-    
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model.to(device)
-    model.eval()
-    
-    all_preds = []
-    all_labels = []
-    all_probs = []
-    
-    with torch.no_grad():
-        for inputs, labels, _ in test_loader:
-            inputs, labels = inputs.to(device), labels.to(device)
-            outputs = model(inputs)
-            
-            if config.classification_mode == "binary":
-                probs = torch.sigmoid(outputs)
-                preds = (probs > 0.5).long()
-                all_probs.extend(probs.cpu().numpy().flatten())
-            else:  # ternary
-                probs = torch.softmax(outputs, dim=1)
-                preds = torch.argmax(probs, dim=1)
-                all_probs.extend(probs.cpu().numpy())
-            
-            all_preds.extend(preds.cpu().numpy().flatten() if config.classification_mode == "binary" 
-                           else preds.cpu().numpy())
-            all_labels.extend(labels.cpu().numpy().flatten() if config.classification_mode == "binary" 
-                            else labels.cpu().numpy())
-    
-    # Calculate metrics
-    accuracy = accuracy_score(all_labels, all_preds)
-    
-    if config.classification_mode == "binary":
-        precision = precision_score(all_labels, all_preds, zero_division=0)
-        recall = recall_score(all_labels, all_preds, zero_division=0)
-        f1 = f1_score(all_labels, all_preds, zero_division=0)
-        auc = roc_auc_score(all_labels, all_probs) if len(np.unique(all_labels)) > 1 else 0.0
-        
-        metrics = {
-            'accuracy': accuracy,
-            'precision': precision,
-            'recall': recall,
-            'f1_score': f1,
-            'auc': auc
-        }
-        
-        logger.info(f"Test Set Results:")
-        logger.info(f"  Accuracy: {accuracy:.4f}")
-        logger.info(f"  Precision: {precision:.4f}")
-        logger.info(f"  Recall: {recall:.4f}")
-        logger.info(f"  F1 Score: {f1:.4f}")
-        logger.info(f"  AUC: {auc:.4f}")
-        
-    else:  # ternary
-        precision_macro = precision_score(all_labels, all_preds, average='macro', zero_division=0)
-        recall_macro = recall_score(all_labels, all_preds, average='macro', zero_division=0)
-        f1_macro = f1_score(all_labels, all_preds, average='macro', zero_division=0)
-        
-        precision_weighted = precision_score(all_labels, all_preds, average='weighted', zero_division=0)
-        recall_weighted = recall_score(all_labels, all_preds, average='weighted', zero_division=0)
-        f1_weighted = f1_score(all_labels, all_preds, average='weighted', zero_division=0)
-        
-        metrics = {
-            'accuracy': accuracy,
-            'precision_macro': precision_macro,
-            'recall_macro': recall_macro,
-            'f1_macro': f1_macro,
-            'precision_weighted': precision_weighted,
-            'recall_weighted': recall_weighted,
-            'f1_weighted': f1_weighted
-        }
-        
-        logger.info(f"Test Set Results:")
-        logger.info(f"  Accuracy: {accuracy:.4f}")
-        logger.info(f"  Precision (Macro): {precision_macro:.4f}")
-        logger.info(f"  Recall (Macro): {recall_macro:.4f}")
-        logger.info(f"  F1 Score (Macro): {f1_macro:.4f}")
-        logger.info(f"  Precision (Weighted): {precision_weighted:.4f}")
-        logger.info(f"  Recall (Weighted): {recall_weighted:.4f}")
-        logger.info(f"  F1 Score (Weighted): {f1_weighted:.4f}")
-    
-    return metrics
-
-def plot_confusion_matrix_standalone(model: torch.nn.Module, test_loader: DataLoader, 
-                                   config: ClassificationConfig, save_path: Path) -> None:
-    """
-    Plot confusion matrix for test set predictions.
-    
-    Args:
-        model: Trained PyTorch model
-        test_loader: DataLoader for test set
-        config: Configuration object
-        save_path: Path to save the confusion matrix plot
-    """
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model.to(device)
-    model.eval()
-    
-    all_preds = []
-    all_labels = []
-    
-    with torch.no_grad():
-        for inputs, labels, _ in test_loader:
-            inputs, labels = inputs.to(device), labels.to(device)
-            outputs = model(inputs)
-            
-            if config.classification_mode == "binary":
-                probs = torch.sigmoid(outputs)
-                preds = (probs > 0.5).long()
-            else:  # ternary
-                probs = torch.softmax(outputs, dim=1)
-                preds = torch.argmax(probs, dim=1)
-            
-            all_preds.extend(preds.cpu().numpy().flatten() if config.classification_mode == "binary" 
-                           else preds.cpu().numpy())
-            all_labels.extend(labels.cpu().numpy().flatten() if config.classification_mode == "binary" 
-                            else labels.cpu().numpy())
-    
-    # Create confusion matrix
-    cm = confusion_matrix(all_labels, all_preds)
-    
-    # Set up class names
-    if config.classification_mode == "binary":
-        class_names = ['Non-Cancerous', 'Cancerous']
-    else:
-        class_names = ['Non-Cancerous', 'Cancerous', 'False-Positive']
-    
-    # Plot
-    plt.figure(figsize=(8, 6))
-    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', 
-                xticklabels=class_names, yticklabels=class_names)
-    plt.title(f'Confusion Matrix - {config.classification_mode.title()} Classification')
-    plt.ylabel('True Label')
-    plt.xlabel('Predicted Label')
-    plt.tight_layout()
-    
-    # Save plot
-    save_path.parent.mkdir(parents=True, exist_ok=True)
-    plt.savefig(save_path, dpi=300, bbox_inches='tight')
-    plt.show()
-    
-    logger.info(f"Confusion matrix saved to {save_path}")
 
 def optimize_thresholds_and_update_config(model_path: Path, original_config: ClassificationConfig,
                                          test_loader: DataLoader, test_data: list,
@@ -341,56 +81,27 @@ def optimize_thresholds_and_update_config(model_path: Path, original_config: Cla
         return original_config
     
     # Create updated configuration with optimized thresholds
-    updated_config = ClassificationConfig(
-        # Copy all original parameters
-        classification_mode=original_config.classification_mode,
-        data_dir=original_config.data_dir,
-        labels_csv=original_config.labels_csv,
-        image_size=original_config.image_size,
-        normalize_mean=original_config.normalize_mean,
-        normalize_std=original_config.normalize_std,
-        batch_size=original_config.batch_size,
-        epochs=original_config.epochs,
-        learning_rate=original_config.learning_rate,
-        optimizer=original_config.optimizer,
-        loss_function=original_config.loss_function,
-        weight_decay=original_config.weight_decay,
-        use_class_weights=original_config.use_class_weights,
-        num_workers=original_config.num_workers,
-        pin_memory=original_config.pin_memory,
-        model_name=original_config.model_name,
-        pretrained=original_config.pretrained,
-        patience=original_config.patience,
-        early_stopping_metric=original_config.early_stopping_metric,
-        train_split=original_config.train_split,
-        val_split=original_config.val_split,
-        test_split=original_config.test_split,
-        random_seed=original_config.random_seed,
-        
-        # Update with optimized thresholds
-        confidence_threshold_high=recommended.get('high_threshold', 
-                                                 recommended.get('confidence_threshold_high', 
-                                                               original_config.confidence_threshold_high)),
-        confidence_threshold_low=recommended.get('low_threshold', 
-                                                recommended.get('confidence_threshold_low', 
-                                                              original_config.confidence_threshold_low)),
-        uncertainty_threshold=recommended.get('uncertainty_threshold', 
-                                            original_config.uncertainty_threshold)
-    )
+    original_config.update({
+        'confidence_threshold_high': recommended.get('high_threshold', 
+                                                                recommended.get('confidence_threshold_high', original_config.config.confidence_threshold_high)),
+        'confidence_threshold_low': recommended.get('low_threshold', 
+                                                                recommended.get('confidence_threshold_low', original_config.config.confidence_threshold_low)),
+        'uncertainty_threshold': recommended.get('uncertainty_threshold', original_config.config.uncertainty_threshold)
+    })
     
     # Save updated configuration
     optimized_config_path = output_dir / f"optimized_{original_config.classification_mode}_config.yaml"
-    updated_config.to_yaml(optimized_config_path)
+    original_config.to_yaml(optimized_config_path)
     
     logger.info(f"Optimized configuration saved to {optimized_config_path}")
     logger.info(f"Optimized thresholds:")
     if original_config.classification_mode == "binary":
-        logger.info(f"  Low threshold: {updated_config.confidence_threshold_low:.3f}")
-        logger.info(f"  High threshold: {updated_config.confidence_threshold_high:.3f}")
+        logger.info(f"  Low threshold: {original_config.confidence_threshold_low:.3f}")
+        logger.info(f"  High threshold: {original_config.confidence_threshold_high:.3f}")
     else:
-        logger.info(f"  Confidence low: {updated_config.confidence_threshold_low:.3f}")
-        logger.info(f"  Confidence high: {updated_config.confidence_threshold_high:.3f}")
-        logger.info(f"  Uncertainty threshold: {updated_config.uncertainty_threshold:.3f}")
+        logger.info(f"  Confidence low: {original_config.confidence_threshold_low:.3f}")
+        logger.info(f"  Confidence high: {original_config.confidence_threshold_high:.3f}")
+        logger.info(f"  Uncertainty threshold: {original_config.uncertainty_threshold:.3f}")
     
     # Save optimization summary
     optimization_summary = {
@@ -400,9 +111,9 @@ def optimize_thresholds_and_update_config(model_path: Path, original_config: Cla
             'uncertainty_threshold': original_config.uncertainty_threshold
         },
         'optimized_thresholds': {
-            'confidence_threshold_high': updated_config.confidence_threshold_high,
-            'confidence_threshold_low': updated_config.confidence_threshold_low,
-            'uncertainty_threshold': updated_config.uncertainty_threshold
+            'confidence_threshold_high': original_config.confidence_threshold_high,
+            'confidence_threshold_low': original_config.confidence_threshold_low,
+            'uncertainty_threshold': original_config.uncertainty_threshold
         },
         'optimization_strategy': recommended.get('criterion', 'balanced'),
         'performance_metrics': {
@@ -417,7 +128,7 @@ def optimize_thresholds_and_update_config(model_path: Path, original_config: Cla
     with open(output_dir / "threshold_optimization_summary.json", 'w') as f:
         json.dump(optimization_summary, f, indent=4, default=str)
     
-    return updated_config
+    return original_config
 
 def evaluate_with_optimized_thresholds(optimized_config: ClassificationConfig,
                                      model_path: Path, test_loader: DataLoader,
@@ -474,6 +185,67 @@ def evaluate_with_optimized_thresholds(optimized_config: ClassificationConfig,
             print(f"  Precision (Macro): {metrics['precision_macro']:.4f}")
             print(f"  Recall (Macro): {metrics['recall_macro']:.4f}")
 
+    
+def create_threshold_comparison_report(original_config: ClassificationConfig, 
+                                     optimized_config: ClassificationConfig,
+                                     output_dir: Path) -> None:
+    """Create a comparison report between original and optimized thresholds."""
+    
+    report_path = output_dir / "threshold_comparison_report.txt"
+    
+    with open(report_path, 'w') as f:
+        f.write("THRESHOLD OPTIMIZATION COMPARISON REPORT\n")
+        f.write("=" * 50 + "\n\n")
+        
+        f.write(f"Classification Mode: {original_config.classification_mode}\n")
+        f.write(f"Model: {original_config.model_name}\n")
+        f.write(f"Optimization Date: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+        
+        f.write("THRESHOLD CHANGES:\n")
+        f.write("-" * 30 + "\n")
+        
+        if original_config.classification_mode == "binary":
+            f.write(f"Low Threshold:\n")
+            f.write(f"  Original: {original_config.confidence_threshold_low:.3f}\n")
+            f.write(f"  Optimized: {optimized_config.confidence_threshold_low:.3f}\n")
+            f.write(f"  Change: {optimized_config.confidence_threshold_low - original_config.confidence_threshold_low:+.3f}\n\n")
+            
+            f.write(f"High Threshold:\n")
+            f.write(f"  Original: {original_config.confidence_threshold_high:.3f}\n")
+            f.write(f"  Optimized: {optimized_config.confidence_threshold_high:.3f}\n")
+            f.write(f"  Change: {optimized_config.confidence_threshold_high - original_config.confidence_threshold_high:+.3f}\n\n")
+        else:
+            f.write(f"Confidence Low Threshold:\n")
+            f.write(f"  Original: {original_config.confidence_threshold_low:.3f}\n")
+            f.write(f"  Optimized: {optimized_config.confidence_threshold_low:.3f}\n")
+            f.write(f"  Change: {optimized_config.confidence_threshold_low - original_config.confidence_threshold_low:+.3f}\n\n")
+            
+            f.write(f"Confidence High Threshold:\n")
+            f.write(f"  Original: {original_config.confidence_threshold_high:.3f}\n")
+            f.write(f"  Optimized: {optimized_config.confidence_threshold_high:.3f}\n")
+            f.write(f"  Change: {optimized_config.confidence_threshold_high - original_config.confidence_threshold_high:+.3f}\n\n")
+            
+            f.write(f"Uncertainty Threshold:\n")
+            f.write(f"  Original: {original_config.uncertainty_threshold:.3f}\n")
+            f.write(f"  Optimized: {optimized_config.uncertainty_threshold:.3f}\n")
+            f.write(f"  Change: {optimized_config.uncertainty_threshold - original_config.uncertainty_threshold:+.3f}\n\n")
+        
+        f.write("USAGE RECOMMENDATIONS:\n")
+        f.write("-" * 30 + "\n")
+        f.write("1. Use the optimized configuration for new inference tasks\n")
+        f.write("2. The optimized thresholds are designed to balance performance and uncertainty\n")
+        f.write("3. Review the detailed optimization results for alternative threshold strategies\n")
+        f.write("4. Consider your specific use case when choosing between optimization strategies\n\n")
+        
+        f.write("FILES GENERATED:\n")
+        f.write("-" * 30 + "\n")
+        f.write(f"• Optimized config: optimized_{original_config.classification_mode}_config.yaml\n")
+        f.write(f"• Optimization details: threshold_optimization/\n")
+        f.write(f"• Evaluation results: optimized_evaluation_results.json\n")
+        f.write(f"• This report: threshold_comparison_report.txt\n")
+    
+    logger.info(f"Threshold comparison report saved to {report_path}")
+
 def main():
     parser = argparse.ArgumentParser(description="Integrated training pipeline with threshold optimization")
     parser.add_argument("--config", type=str, required=True, 
@@ -506,9 +278,23 @@ def main():
     # Save original configuration to output directory
     config.to_yaml(output_dir / f"original_{config.classification_mode}_config.yaml")
     
-    # Set up data loaders
-    train_loader, val_loader, test_loader, train_data, val_data, test_data, pos_weight, class_weights = setup_data_loaders(config)
+    # Load labels and get image paths
+    label_map = load_classification_labels(
+        Path(config.labels_csv), 
+        classification_mode=config.classification_mode
+    )
     
+    data_samples = get_image_paths_and_labels(
+        Path(config.data_dir), 
+        label_map
+    )
+    
+    # Set up data loaders using the new DataLoaderManager
+    data_manager = DataLoaderManager(config)
+    train_loader, val_loader, test_loader = data_manager.setup_data_loaders(data_samples)
+    train_data, val_data, test_data = data_manager.get_data_splits()
+    pos_weight, class_weights = data_manager.get_class_weights()
+
     # Create model
     model = get_classification_model(
         model_name=config.model_name,
@@ -580,14 +366,9 @@ def main():
     if test_loader is not None:
         logger.info("Evaluating on test set with original thresholds...")
         
-        # Evaluate with original thresholds using our standalone function
-        test_metrics = evaluate_test_set_with_trainer(
-            model=model,
-            test_loader=test_loader,
-            config=config,
-            output_dir=output_dir
-        )
-        
+        evaluator = ModelEvaluator(classifier=model)
+        test_metrics = evaluator.evaluate_test_set(test_loader=test_loader, test_data=test_data, output_dir=output_dir)
+
         # Save original test metrics
         original_test_metrics_path = output_dir / f"original_{config.classification_mode}_test_metrics.json"
         with open(original_test_metrics_path, 'w') as f:
@@ -596,7 +377,7 @@ def main():
         
         # Plot confusion matrix with original thresholds
         confusion_matrix_path = output_dir / f"original_{config.classification_mode}_confusion_matrix.png"
-        plot_confusion_matrix_standalone(model, test_loader, config, confusion_matrix_path)
+        evaluator.plot_confusion_matrix_standalone(confusion_matrix_path)
         
         # Print original evaluation results
         print("\n" + "="*60)
@@ -669,67 +450,6 @@ def main():
     print(f"\nAll results saved to: {output_dir}")
     
     logger.info("Integrated training pipeline completed successfully!")
-
-def create_threshold_comparison_report(original_config: ClassificationConfig, 
-                                     optimized_config: ClassificationConfig,
-                                     output_dir: Path) -> None:
-    """Create a comparison report between original and optimized thresholds."""
-    
-    report_path = output_dir / "threshold_comparison_report.txt"
-    
-    with open(report_path, 'w') as f:
-        f.write("THRESHOLD OPTIMIZATION COMPARISON REPORT\n")
-        f.write("=" * 50 + "\n\n")
-        
-        f.write(f"Classification Mode: {original_config.classification_mode}\n")
-        f.write(f"Model: {original_config.model_name}\n")
-        f.write(f"Optimization Date: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
-        
-        f.write("THRESHOLD CHANGES:\n")
-        f.write("-" * 30 + "\n")
-        
-        if original_config.classification_mode == "binary":
-            f.write(f"Low Threshold:\n")
-            f.write(f"  Original: {original_config.confidence_threshold_low:.3f}\n")
-            f.write(f"  Optimized: {optimized_config.confidence_threshold_low:.3f}\n")
-            f.write(f"  Change: {optimized_config.confidence_threshold_low - original_config.confidence_threshold_low:+.3f}\n\n")
-            
-            f.write(f"High Threshold:\n")
-            f.write(f"  Original: {original_config.confidence_threshold_high:.3f}\n")
-            f.write(f"  Optimized: {optimized_config.confidence_threshold_high:.3f}\n")
-            f.write(f"  Change: {optimized_config.confidence_threshold_high - original_config.confidence_threshold_high:+.3f}\n\n")
-        else:
-            f.write(f"Confidence Low Threshold:\n")
-            f.write(f"  Original: {original_config.confidence_threshold_low:.3f}\n")
-            f.write(f"  Optimized: {optimized_config.confidence_threshold_low:.3f}\n")
-            f.write(f"  Change: {optimized_config.confidence_threshold_low - original_config.confidence_threshold_low:+.3f}\n\n")
-            
-            f.write(f"Confidence High Threshold:\n")
-            f.write(f"  Original: {original_config.confidence_threshold_high:.3f}\n")
-            f.write(f"  Optimized: {optimized_config.confidence_threshold_high:.3f}\n")
-            f.write(f"  Change: {optimized_config.confidence_threshold_high - original_config.confidence_threshold_high:+.3f}\n\n")
-            
-            f.write(f"Uncertainty Threshold:\n")
-            f.write(f"  Original: {original_config.uncertainty_threshold:.3f}\n")
-            f.write(f"  Optimized: {optimized_config.uncertainty_threshold:.3f}\n")
-            f.write(f"  Change: {optimized_config.uncertainty_threshold - original_config.uncertainty_threshold:+.3f}\n\n")
-        
-        f.write("USAGE RECOMMENDATIONS:\n")
-        f.write("-" * 30 + "\n")
-        f.write("1. Use the optimized configuration for new inference tasks\n")
-        f.write("2. The optimized thresholds are designed to balance performance and uncertainty\n")
-        f.write("3. Review the detailed optimization results for alternative threshold strategies\n")
-        f.write("4. Consider your specific use case when choosing between optimization strategies\n\n")
-        
-        f.write("FILES GENERATED:\n")
-        f.write("-" * 30 + "\n")
-        f.write(f"• Optimized config: optimized_{original_config.classification_mode}_config.yaml\n")
-        f.write(f"• Optimization details: threshold_optimization/\n")
-        f.write(f"• Evaluation results: optimized_evaluation_results.json\n")
-        f.write(f"• This report: threshold_comparison_report.txt\n")
-    
-    logger.info(f"Threshold comparison report saved to {report_path}")
-
 
 if __name__ == "__main__":
     main()
