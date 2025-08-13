@@ -2,7 +2,6 @@
 
 [![Python Version](https://img.shields.io/badge/python-3.10+-blue.svg)](https://python.org/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](https://claude.ai/chat/LICENSE)
-[![Code Style](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
 
 A comprehensive deep learning framework for leukemia detection in whole slide images (WSI), featuring both segmentation and classification models for automated analysis of bone marrow samples.
 
