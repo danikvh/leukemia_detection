@@ -171,7 +171,7 @@ Effective preprocessing, especially color deconvolution for stained images, is c
 
 ![Project Logo](docs/images/color_deconvolution.png)
 
-**Figure Description:** Visual comparison of preprocessing strategies applied to a representative TNBC-Extended dataset image. (a) Original RGB input. (b) Image preprocessed using a simplified approach, converting the input to be primarily represented in the Blue channel. (c) Image after color deconvolution, where only the Hematoxylin component is utilized and assigned to the Blue channel. (d) Image after color deconvolution, with the Hematoxylin component assigned to the Green channel and the DAB component to the Blue channel (IHC stain). (e) Image after color deconvolution, with the Hematoxylin component assigned to the Green channel and the Eosin component to the Blue channel (H&E stain). [Page 49]
+**Figure Description:** Visual comparison of preprocessing strategies applied to a representative TNBC-Extended dataset image. (a) Original RGB input. (b) Image preprocessed using a simplified approach, converting the input to be primarily represented in the Blue channel. (c) Image after color deconvolution, where only the Hematoxylin component is utilized and assigned to the Blue channel. (d) Image after color deconvolution, with the Hematoxylin component assigned to the Green channel and the DAB component to the Blue channel (IHC stain). (e) Image after color deconvolution, with the Hematoxylin component assigned to the Green channel and the Eosin component to the Blue channel (H&E stain). 
 
 ### Key Quantitative Results
 
